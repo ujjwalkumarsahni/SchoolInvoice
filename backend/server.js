@@ -3,7 +3,17 @@ import cors from "cors";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import connectDB from "./config/db.js";
+import invoiceRoutes from './routes/invoiceRoutes.js';
+import paymentRoutes from './routes/paymentRoutes.js';
 
+
+// MONGODB_URI = mongodb+srv://ujjwalkumar0514_db_user:niPo2rOO1QQqSpTA@cluster0.lw7jn1f.mongodb.net
+// JWT_SECRET=your_super_secure_jwt_secret_key_change_in_production
+// JWT_EXPIRES_IN=7d
+
+// CLOUDINARY_CLOUD_NAME=domel2a7e
+// CLOUDINARY_API_KEY=896597977738598
+// CLOUDINARY_API_SECRET=6YdSLvnN2gqnz-06W-49E8fTZFo
 // Load env variables
 dotenv.config();
 connectDB();
@@ -34,7 +44,8 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use(cookieParser());
 
-
+app.use('/api/invoices', invoiceRoutes);
+app.use('/api/payments', paymentRoutes);
 // ======================
 // Health Check
 // ======================
