@@ -21,7 +21,7 @@ const seedAdmin = async () => {
     const admin = await User.create({
       name: "Super Admin",
       email: "admin@test.com",
-      passwordHash: "123456", // plain password (auto-hash hoga)
+      passwordHash: "123456", 
       role: "admin",
       isActive: true,
     });

@@ -34,24 +34,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use(cookieParser());
 
-import schoolRoutes from "./OrderManagement/routes/schoolRoutes.js";
-import authRoutes from "./OrderManagement/routes/authRoutes.js";
-import ordersRoutes from "./OrderManagement/routes/orderRoutes.js";
-import employeeRoutes from "./OrderManagement/routes/employeeRoutes.js";
-import employeePostingRoutes from "./OrderManagement/routes/employeePostingRoutes.js";
-import SchoolInvoiceRoutes from "./OrderManagement/routes/SchoolInvoice/SchoolInvoiceRoutes.js";
-import leaveRoutes from "./OrderManagement/routes/SchoolInvoice/leaveRoutes.js";
-app.use('/api/schools', schoolRoutes);
-app.use("/api/auth", authRoutes);
-app.use('/api/orders', ordersRoutes);
-app.use("/api/employee",employeeRoutes);
-app.use('/api/employee-postings', employeePostingRoutes);
 
-
-app.use("/api/leaves", leaveRoutes);
-
-
-app.use("/api/invoices", SchoolInvoiceRoutes);
 // ======================
 // Health Check
 // ======================
