@@ -1,3 +1,4 @@
+// services/billingCalculator.js
 import mongoose from 'mongoose';
 import EmployeePosting from '../models/EmployeePosting.js';
 import Leave from '../models/Leave.js';
@@ -11,6 +12,8 @@ export const calculateMonthlyBilling = async (month, year, workingDaysPerMonth =
     // Get all active postings for the month
     const startOfMonth = new Date(year, month - 1, 1);
     const endOfMonth = new Date(year, month, 0);
+    
+    console.log(`Calculating monthly billing for ${month}/${year}`);
     
     const postings = await EmployeePosting.find({
       $or: [
@@ -39,13 +42,20 @@ export const calculateMonthlyBilling = async (month, year, workingDaysPerMonth =
     .populate('school')
     .lean();
 
+    console.log(`Found ${postings.length} postings`);
+
     const billingItems = [];
 
     for (const posting of postings) {
-      if (!posting.employee || !posting.school) continue;
+      if (!posting.employee || !posting.school) {
+        console.log('Skipping posting with missing employee or school:', posting._id);
+        continue;
+      }
 
       // Calculate deployed days
       const deployedDays = calculateDeployedDays(posting, month, year);
+      console.log(`Posting ${posting._id}: deployedDays = ${deployedDays}`);
+      
       if (deployedDays === 0) continue;
 
       // Get unpaid leaves for this employee at this school during the month
@@ -73,26 +83,42 @@ export const calculateMonthlyBilling = async (month, year, workingDaysPerMonth =
       // Calculate billable days
       const billableDays = Math.max(0, deployedDays - unpaidLeaveDays);
 
-      // Get monthly rate from posting (you may need to add billingRate field to EmployeePosting)
-      const monthlyRate = posting.billingRate || 0; // Make sure to add this field
+      // ⭐ IMPORTANT: Use monthlyBillingSalary instead of billingRate
+      const monthlyBillingSalary = posting.monthlyBillingSalary || 0;
+      
+      // Log warning if monthlyBillingSalary is 0
+      if (monthlyBillingSalary === 0) {
+        console.warn(`Warning: monthlyBillingSalary is 0 for posting ${posting._id}`);
+      }
 
       // Calculate prorated amount
-      const amount = calculateProratedAmount(monthlyRate, billableDays, workingDaysPerMonth);
+      const amount = calculateProratedAmount(monthlyBillingSalary, billableDays, workingDaysPerMonth);
+      const perDayRate = workingDaysPerMonth > 0 ? monthlyBillingSalary / workingDaysPerMonth : 0;
+
+      const employeeName = posting.employee.user?.basicInfo?.fullName || 
+                          posting.employee.basicInfo?.fullName || 
+                          'Unknown';
+      
+      const designation = posting.employee.user?.basicInfo?.designation || 
+                         posting.employee.basicInfo?.designation || 
+                         '';
 
       billingItems.push({
         employee: posting.employee._id,
-        employeeName: posting.employee.user?.basicInfo?.fullName || 'Unknown',
-        designation: posting.employee.user?.basicInfo?.designation || '',
-        monthlyRate,
+        employeeName,
+        designation,
+        monthlyRate: monthlyBillingSalary, // Map to monthlyRate field in invoice
         deployedDays,
         unpaidLeaves: unpaidLeaveDays,
         billableDays,
-        perDayRate: monthlyRate / workingDaysPerMonth,
+        perDayRate,
         amount,
         posting: posting._id,
         joinDate: posting.startDate,
         leaveDate: posting.endDate
       });
+
+      console.log(`Added billing item for ${employeeName}: amount=${amount}`);
     }
 
     return billingItems;
@@ -109,6 +135,8 @@ export const calculateSchoolBilling = async (schoolId, month, year) => {
   try {
     const startOfMonth = new Date(year, month - 1, 1);
     const endOfMonth = new Date(year, month, 0);
+    
+    console.log(`Calculating school billing for school ${schoolId}, month ${month}/${year}`);
     
     const postings = await EmployeePosting.find({
       school: schoolId,
@@ -135,13 +163,20 @@ export const calculateSchoolBilling = async (schoolId, month, year) => {
     })
     .lean();
 
+    console.log(`Found ${postings.length} postings for this school`);
+
     const billingItems = [];
     let subtotal = 0;
 
     for (const posting of postings) {
-      if (!posting.employee) continue;
+      if (!posting.employee) {
+        console.log('Skipping posting with no employee:', posting._id);
+        continue;
+      }
 
       const deployedDays = calculateDeployedDays(posting, month, year);
+      console.log(`Posting ${posting._id}: deployedDays = ${deployedDays}`);
+      
       if (deployedDays === 0) continue;
 
       const leaves = await Leave.find({
@@ -165,15 +200,32 @@ export const calculateSchoolBilling = async (schoolId, month, year) => {
       }
 
       const billableDays = Math.max(0, deployedDays - unpaidLeaveDays);
-      const monthlyRate = posting.billingRate || 0;
-      const perDayRate = monthlyRate / 26;
+      
+      // ⭐ IMPORTANT: Use monthlyBillingSalary instead of billingRate
+      const monthlyBillingSalary = posting.monthlyBillingSalary || 0;
+      
+      // Log warning if monthlyBillingSalary is 0
+      if (monthlyBillingSalary === 0) {
+        console.warn(`Warning: monthlyBillingSalary is 0 for posting ${posting._id}`);
+      }
+      
+      const workingDaysPerMonth = 26;
+      const perDayRate = workingDaysPerMonth > 0 ? monthlyBillingSalary / workingDaysPerMonth : 0;
       const amount = Math.round(perDayRate * billableDays * 100) / 100;
+
+      const employeeName = posting.employee.user?.basicInfo?.fullName || 
+                          posting.employee.basicInfo?.fullName || 
+                          'Unknown';
+      
+      const designation = posting.employee.user?.basicInfo?.designation || 
+                         posting.employee.basicInfo?.designation || 
+                         '';
 
       billingItems.push({
         employee: posting.employee._id,
-        employeeName: posting.employee.user?.basicInfo?.fullName || 'Unknown',
-        designation: posting.employee.user?.basicInfo?.designation || '',
-        monthlyRate,
+        employeeName,
+        designation,
+        monthlyRate: monthlyBillingSalary, // Map to monthlyRate field in invoice
         deployedDays,
         unpaidLeaves: unpaidLeaveDays,
         billableDays,
@@ -185,14 +237,62 @@ export const calculateSchoolBilling = async (schoolId, month, year) => {
       });
 
       subtotal += amount;
+      console.log(`Added billing item for ${employeeName}: amount=${amount}`);
     }
 
-    return {
+    const result = {
       items: billingItems,
       subtotal: Math.round(subtotal * 100) / 100
     };
+
+    console.log(`School billing complete: subtotal=${result.subtotal}`);
+    return result;
   } catch (error) {
     console.error('Error calculating school billing:', error);
+    throw error;
+  }
+};
+
+/**
+ * Get billing summary for multiple schools
+ */
+export const getBillingSummary = async (month, year) => {
+  try {
+    const schools = await EmployeePosting.distinct('school', {
+      $or: [
+        {
+          startDate: { $lte: new Date(year, month, 0) },
+          $or: [
+            { endDate: { $gte: new Date(year, month - 1, 1) } },
+            { endDate: null }
+          ]
+        },
+        {
+          startDate: { $gte: new Date(year, month - 1, 1), $lte: new Date(year, month, 0) }
+        }
+      ],
+      status: { $in: ['continue', 'change_school'] }
+    });
+
+    const summary = [];
+    
+    for (const schoolId of schools) {
+      try {
+        const billing = await calculateSchoolBilling(schoolId, month, year);
+        if (billing.items.length > 0) {
+          summary.push({
+            school: schoolId,
+            ...billing
+          });
+        }
+      } catch (error) {
+        console.error(`Error calculating billing for school ${schoolId}:`, error);
+      }
+    }
+
+    return summary;
+  } catch (error) {
+    console.error('Error getting billing summary:', error);
     throw error;
   }
 };

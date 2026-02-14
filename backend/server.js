@@ -3,8 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import connectDB from "./config/db.js";
-import invoiceRoutes from './routes/invoiceRoutes.js';
-import paymentRoutes from './routes/paymentRoutes.js';
+
 
 
 // MONGODB_URI = mongodb+srv://ujjwalkumar0514_db_user:niPo2rOO1QQqSpTA@cluster0.lw7jn1f.mongodb.net
@@ -43,7 +42,16 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use(cookieParser());
-
+import schoolRoutes from "./routes/schoolRoutes.js";
+import authRoutes from "./routes/authRoutes.js";
+import employeeRoutes from "./routes/employeeRoutes.js";
+import employeePostingRoutes from "./routes/employeePostingRoutes.js";
+import invoiceRoutes from './routes/invoiceRoutes.js';    
+import paymentRoutes from './routes/paymentRoutes.js';
+app.use("/api/auth", authRoutes);
+app.use('/api/schools', schoolRoutes);
+app.use("/api/employee",employeeRoutes);
+app.use('/api/employee-postings', employeePostingRoutes);
 app.use('/api/invoices', invoiceRoutes);
 app.use('/api/payments', paymentRoutes);
 // ======================

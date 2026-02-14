@@ -1,79 +1,89 @@
-import React from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
-import { Toaster } from 'react-hot-toast';
-import { AuthProvider } from './context/AuthContext.jsx';
-import PrivateRoute from './components/PrivateRoute.jsx';
+import React from "react";
+import {
+  BrowserRouter as Router,
+  Routes,
+  Route,
+  Navigate,
+} from "react-router-dom";
+import { Toaster } from "react-hot-toast";
 
-// Layout
-import Layout from './components/Layout.jsx';
+import { AuthProvider } from "./context/AuthContext.jsx";
+import PrivateRoute from "./components/Common/PrivateRoute.jsx";
+import Layout from "./components/Layout/Layout.jsx";
 
-// Auth Pages
-import Login from './pages/Login.jsx';
+import Login from "./pages/Login.jsx";
 
-// Main Pages
-import Dashboard from './pages/Dashboard.jsx';
-import Schools from './pages/Schools.jsx';
-import CreateSchool from './pages/CreateSchool.jsx';
-import EditSchool from './pages/EditSchool.jsx';
-import SchoolDetails from './pages/SchoolDetails.jsx';
+import EmployeePostings from "./pages/EmployeePostings/EmployeePostings.jsx";
+import CreatePosting from "./pages/EmployeePostings/CreatePosting.jsx";
+import PostingDetails from "./pages/EmployeePostings/PostingDetails.jsx";
+import EmployeeHistory from "./pages/EmployeePostings/EmployeeHistory.jsx";
+import PostingAnalytics from "./pages/EmployeePostings/PostingAnalytics.jsx";
 
-import Employees from './pages/Employees.jsx';
-import CreateEmployee from './pages/CreateEmployee.jsx';
-import EmployeeDetails from './pages/EmployeeDetails.jsx';
+import EmployeeList from "./pages/Employees/EmployeeList.jsx";
+import CreateEmployee from "./pages/Employees/CreateEmployee.jsx";
+import EmployeeDetails from "./pages/Employees/EmployeeDetails.jsx";
 
-import EmployeePosting from './pages/EmployeePosting.jsx';
-import CreateEmployeePosting from './pages/CreateEmployeePosting.jsx';
-
-import Invoice from './pages/Invoice.jsx';
-import CreateInvoice from './pages/CreateInvoice.jsx';
-import InvoiceDetails from './pages/InvoiceDetails.jsx';
-
-import LeaveManagement from './pages/LeaveManagement.jsx';
-import EditEmployee from './pages/EditEmployee.jsx';
-
+import SchoolList from "./pages/Schools/SchoolList.jsx";
+import CreateSchool from "./pages/Schools/CreateSchool.jsx";
+import SchoolDetails from "./pages/Schools/SchoolDetails.jsx";
+import Dashboard from "./pages/Dashboard.jsx"
 function App() {
   return (
     <Router>
       <AuthProvider>
-        <Toaster position="top-right" />
+        <Toaster
+          position="top-right"
+          toastOptions={{
+            duration: 4000,
+            style: { background: "#363636", color: "#fff" },
+          }}
+        />
+
         <Routes>
+          {/* Public */}
           <Route path="/login" element={<Login />} />
-          
-          <Route path="/" element={<PrivateRoute><Layout /></PrivateRoute>}>
-            <Route index element={<Navigate to="/dashboard" />} />
+
+          {/* Private Layout */}
+          <Route
+            path="/"
+            element={
+              <PrivateRoute>
+                <Layout />
+              </PrivateRoute>
+            }
+          >
+            <Route index element={<Navigate to="/dashboard" replace />} />
+
+            {/* Dashboard */}
             <Route path="dashboard" element={<Dashboard />} />
-            
-            {/* School Routes */}
+
+            {/* ================= SCHOOLS ================= */}
             <Route path="schools">
-              <Route index element={<Schools />} />
-              <Route path="create" element={<CreateSchool />} />
-              <Route path="edit/:id" element={<EditSchool />} />
+              <Route index element={<SchoolList />} />
+              <Route path="new" element={<CreateSchool />} />
+              <Route path="edit/:id" element={<CreateSchool />} />
               <Route path=":id" element={<SchoolDetails />} />
             </Route>
-            
-            {/* Employee Routes */}
+
+            {/* ================= EMPLOYEES ================= */}
             <Route path="employees">
-              <Route index element={<Employees />} />
-              <Route path="create" element={<CreateEmployee />} />
+              <Route index element={<EmployeeList />} />
+              <Route path="new" element={<CreateEmployee />} />
+              <Route path="edit/:id" element={<CreateEmployee />} />
               <Route path=":id" element={<EmployeeDetails />} />
-              <Route path="edit/:id" element={<EditEmployee />} />
             </Route>
-            
-            {/* Employee Posting Routes */}
+
+            {/* ================= POSTINGS ================= */}
             <Route path="postings">
-              <Route index element={<EmployeePosting />} />
-              <Route path="create" element={<CreateEmployeePosting />} />
+              <Route index element={<EmployeePostings />} />
+              <Route path="new" element={<CreatePosting />} />
+              <Route path="analytics" element={<PostingAnalytics />} />
+              <Route
+                path="history/:employeeId"
+                element={<EmployeeHistory />}
+              />
+              <Route path=":id" element={<PostingDetails />} />
             </Route>
-            
-            {/* Invoice Routes */}
-            <Route path="invoices">
-              <Route index element={<Invoice />} />
-              <Route path="create" element={<CreateInvoice />} />
-              <Route path=":id" element={<InvoiceDetails />} />
-            </Route>
-            
-            {/* Leave Management */}
-            <Route path="leaves" element={<LeaveManagement />} />
           </Route>
         </Routes>
       </AuthProvider>

@@ -1,3 +1,4 @@
+// services/invoiceGenerationService.js
 import mongoose from 'mongoose';
 import Invoice from '../models/Invoice.js';
 import School from '../models/School.js';
@@ -38,8 +39,24 @@ export const generateSchoolInvoice = async (schoolId, month, year, userId) => {
     const subtotal = billing.subtotal;
     const totalPayable = subtotal + previousDue;
     
-    // Create invoice
+    // 🔥 FIX: Generate invoice number manually before saving
+    const date = new Date();
+    const yearStr = date.getFullYear().toString().slice(-2);
+    const monthStr = (date.getMonth() + 1).toString().padStart(2, '0');
+    
+    // Get count of invoices for this month to generate sequence
+    const invoiceCount = await Invoice.countDocuments({
+      createdAt: {
+        $gte: new Date(date.getFullYear(), date.getMonth(), 1),
+        $lt: new Date(date.getFullYear(), date.getMonth() + 1, 1)
+      }
+    }) + 1;
+    
+    const invoiceNumber = `INV-${yearStr}${monthStr}-${invoiceCount.toString().padStart(6, '0')}`;
+    
+    // Create invoice with explicit invoiceNumber
     const invoice = new Invoice({
+      invoiceNumber, // 🔥 Explicitly set invoice number
       school: schoolId,
       schoolName: school.name,
       month,

@@ -213,7 +213,7 @@ const employeePostingSchema = new mongoose.Schema({
     required: true
   },
   // ⭐ IMPORTANT: Ye rate company school se charge karegi
-  billingRate: {
+  monthlyBillingSalary: {
     type: Number,
     required: [true, 'Billing rate is required'],
     min: [0, 'Billing rate cannot be negative'],
@@ -268,10 +268,10 @@ employeePostingSchema.virtual('totalBilling').get(function() {
 
 // ✅ Pre-save validation
 employeePostingSchema.pre('save', function(next) {
-  if (this.isActive && !this.billingRate) {
+  if (this.isActive && !this.monthlyBillingSalary) {
     next(new Error('Billing rate is required for active postings'));
   }
-  if (this.isActive && this.billingRate <= 0) {
+  if (this.isActive && this.monthlyBillingSalary <= 0) {
     next(new Error('Billing rate must be greater than 0'));
   }
   next();
