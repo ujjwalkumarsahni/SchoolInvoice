@@ -1,97 +1,82 @@
+
+
+// models/Payment.js
 import mongoose from 'mongoose';
 
 const paymentSchema = new mongoose.Schema({
-  paymentNumber: {
-    type: String,
-    required: true,
-    unique: true
-  },
-  invoice: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Invoice',
-    required: true
-  },
   school: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'School',
     required: true
   },
+  invoices: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Invoice'
+  }],
+  paymentNumber: {
+    type: String,
+    required: true,
+    unique: true
+  },
   amount: {
     type: Number,
-    required: true,
-    min: 0.01
+    required: true
   },
   paymentDate: {
     type: Date,
-    required: true,
-    default: Date.now
+    required: true
   },
   paymentMethod: {
     type: String,
-    enum: ['cash', 'cheque', 'bank_transfer', 'online', 'dd'],
+    enum: ['Cash', 'Cheque', 'Bank Transfer', 'Online', 'DD'],
     required: true
   },
-  referenceNumber: {
-    type: String,
-    trim: true
-  },
-  bankDetails: {
-    bankName: String,
-    branch: String,
-    chequeNumber: String,
-    chequeDate: Date,
-    transactionId: String
-  },
-  notes: String,
+  referenceNumber: String, // Cheque/Transaction number
+  bankName: String,
+  branch: String,
+  remarks: String,
   status: {
     type: String,
-    enum: ['pending', 'cleared', 'bounced', 'cancelled'],
-    default: 'pending'
+    enum: ['Pending', 'Completed', 'Failed', 'Refunded'],
+    default: 'Pending'
   },
-  
-  // For partial payments
-  remainingBalance: {
-    type: Number,
-    default: 0
-  },
-  
-  // Receipt
   receiptNumber: String,
-  receiptGeneratedAt: Date,
-  
-  // Audit
+  receiptPdf: String,
+  receiptPublicId: String,
   receivedBy: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
+    ref: 'User'
   },
   verifiedBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
-  verifiedAt: Date
+  verifiedAt: Date,
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }
 }, {
   timestamps: true
 });
 
-// Indexes
-paymentSchema.index({ invoice: 1 });
-paymentSchema.index({ school: 1 });
-paymentSchema.index({ paymentDate: -1 });
-paymentSchema.index({ status: 1 });
-paymentSchema.index({ referenceNumber: 1 });
-
-// Pre-save middleware to generate payment number
 paymentSchema.pre('save', async function(next) {
-  if (!this.paymentNumber) {
+  if (this.isNew && !this.paymentNumber) {
     const date = new Date();
     const year = date.getFullYear().toString().slice(-2);
     const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    const count = await mongoose.model('Payment').countDocuments() + 1;
-    this.paymentNumber = `PAY-${year}${month}-${count.toString().padStart(6, '0')}`;
+    
+    const lastPayment = await this.constructor.findOne().sort({ paymentNumber: -1 });
+    
+    let sequence = 1;
+    if (lastPayment && lastPayment.paymentNumber) {
+      const lastSeq = parseInt(lastPayment.paymentNumber.split('-')[2]);
+      sequence = lastSeq + 1;
+    }
+    
+    this.paymentNumber = `PAY-${year}${month}-${sequence.toString().padStart(4, '0')}`;
   }
   next();
 });
 
-const Payment = mongoose.model('Payment', paymentSchema);
-export default Payment;
+export default mongoose.model('Payment', paymentSchema);

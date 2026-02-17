@@ -1,215 +1,312 @@
-import mongoose from 'mongoose';
+
+// models/Invoice.js
+import mongoose from "mongoose";
 
 const invoiceItemSchema = new mongoose.Schema({
   employee: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Employee',
-    required: true
+    ref: "Employee",
+    required: true,
   },
   employeeName: {
     type: String,
-    required: true
-  },
-  designation: String,
-  monthlyRate: {
-    type: Number,
     required: true,
-    min: 0
   },
-  deployedDays: {
+  employeeId: {
+    type: String,
+    required: true,
+  },
+  monthlyBillingSalary: {
     type: Number,
     required: true,
     min: 0,
-    max: 31
   },
-  unpaidLeaves: {
+  leaveDays: {
     type: Number,
     default: 0,
-    min: 0
   },
-  billableDays: {
+  leaveDeduction: {
+    type: Number,
+    default: 0,
+  },
+  workingDays: {
+    type: Number,
+    default: 30, // Assuming 30 days month
+  },
+  actualWorkingDays: {
+    type: Number,
+    default: 30,
+  },
+  proratedAmount: {
     type: Number,
     required: true,
-    min: 0
   },
-  perDayRate: {
+  // Per employee TDS/GST if needed
+  tdsPercent: {
     type: Number,
-    required: true,
-    min: 0
+    default: 0,
   },
-  amount: {
+  tdsAmount: {
     type: Number,
-    required: true,
-    min: 0
+    default: 0,
   },
-  posting: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'EmployeePosting',
-    required: true
-  },
-  joinDate: Date,
-  leaveDate: Date
-});
-
-const invoiceSchema = new mongoose.Schema({
-  invoiceNumber: {
-    type: String,
-    required: true,
-    unique: true,
-    trim: true
-  },
-  school: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'School',
-    required: true
-  },
-  schoolName: {
-    type: String,
-    required: true
-  },
-  month: {
+  gstPercent: {
     type: Number,
-    required: true,
-    min: 1,
-    max: 12
+    default: 0,
   },
-  year: {
+  gstAmount: {
     type: Number,
-    required: true
+    default: 0,
   },
-  
-  // Billing Summary
-  items: [invoiceItemSchema],
   subtotal: {
     type: Number,
     required: true,
-    default: 0,
-    min: 0
   },
-  
-  // Carry Forward from previous months
-  previousDue: {
-    type: Number,
-    default: 0,
-    min: 0
-  },
-  totalPayable: {
-    type: Number,
-    required: true,
-    min: 0
-  },
-  
-  // Payment Tracking
-  paidAmount: {
-    type: Number,
-    default: 0,
-    min: 0
-  },
-  balanceDue: {
-    type: Number,
-    required: true,
-    min: 0
-  },
-  
-  // Status Management
-  status: {
-    type: String,
-    enum: ['draft', 'verified', 'sent', 'paid', 'overdue', 'cancelled'],
-    default: 'draft'
-  },
-  
-  // Dates
-  invoiceDate: {
-    type: Date,
-    default: Date.now,
-    required: true
-  },
-  dueDate: {
-    type: Date,
-    required: true
-  },
-  sentDate: Date,
-  paidDate: Date,
-  
-  // Verification
-  verifiedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
-  verifiedAt: Date,
-  
-  // Notes
-  notes: String,
-  terms: {
-    type: String,
-    default: 'Payment due within 30 days'
-  },
-  
-  // Audit
-  createdBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
-  },
-  updatedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
-  
-  // Lock sent invoices from editing
-  isLocked: {
-    type: Boolean,
-    default: false
-  }
-}, {
-  timestamps: true
 });
 
-// Compound index to prevent duplicate invoices
-invoiceSchema.index({ school: 1, month: 1, year: 1 }, { unique: true });
+const invoiceSchema = new mongoose.Schema(
+  {
+    invoiceNumber: {
+      type: String,
+      required: true,
+      unique: true,
+    },
+    school: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "School",
+      required: true,
+    },
+    schoolDetails: {
+      name: String,
+      city: String,
+      address: String,
+      contactPersonName: String,
+      mobile: String,
+      email: String,
+    },
+    month: {
+      type: Number,
+      required: true,
+      min: 1,
+      max: 12,
+    },
+    year: {
+      type: Number,
+      required: true,
+    },
 
-// Indexes for performance
-invoiceSchema.index({ status: 1 });
-invoiceSchema.index({ school: 1, status: 1 });
-invoiceSchema.index({ invoiceNumber: 1 });
-invoiceSchema.index({ dueDate: 1 });
-invoiceSchema.index({ 'items.employee': 1 });
+    // Invoice items (employees)
+    items: [invoiceItemSchema],
 
-// Pre-save middleware to generate invoice number if not provided
-invoiceSchema.pre('save', async function(next) {
-  if (!this.invoiceNumber) {
-    const date = new Date();
-    const year = date.getFullYear().toString().slice(-2);
-    const month = (date.getMonth() + 1).toString().padStart(2, '0');
-    const count = await mongoose.model('Invoice').countDocuments() + 1;
-    this.invoiceNumber = `INV-${year}${month}-${count.toString().padStart(6, '0')}`;
+    // Summary
+    subtotal: {
+      type: Number,
+      required: true,
+      default: 0,
+    },
+
+    // TDS (Overall)
+    tdsPercent: {
+      type: Number,
+      default: 0,
+    },
+    tdsAmount: {
+      type: Number,
+      default: 0,
+    },
+
+    // GST (Overall)
+    gstPercent: {
+      type: Number,
+      default: 0,
+    },
+    gstAmount: {
+      type: Number,
+      default: 0,
+    },
+
+    // Round off
+    roundOff: {
+      type: Number,
+      default: 0,
+    },
+
+    // Grand Total
+    grandTotal: {
+      type: Number,
+      required: true,
+    },
+
+    // Status
+    status: {
+      type: String,
+      enum: ["Draft", "Generated", "Verified", "Sent", "Paid", "Cancelled"],
+      default: "Generated",
+    },
+
+    // Generated By System (Auto)
+    generatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    generatedAt: {
+      type: Date,
+      default: Date.now,
+    },
+
+    // Verified By Admin
+    verifiedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    verifiedAt: Date,
+
+    // Sent to School
+    sentAt: Date,
+    sentBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+
+    // Payment
+    paymentStatus: {
+      type: String,
+      enum: ["Unpaid", "Partial", "Paid", "Overdue"],
+      default: "Unpaid",
+    },
+    paidAmount: {
+      type: Number,
+      default: 0,
+    },
+    dueDate: Date,
+    paidAt: Date,
+
+    // Invoice PDF
+    pdfUrl: String,
+    pdfPublicId: String,
+
+    // Customizations (Admin can modify before verification)
+    customizations: {
+      leaveAdjustments: [
+        {
+          employee: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "Employee",
+          },
+          originalLeaveDays: Number,
+          adjustedLeaveDays: Number,
+          reason: String,
+          adjustedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+          },
+          adjustedAt: Date,
+        },
+      ],
+      tdsAdjustment: {
+        originalPercent: Number,
+        adjustedPercent: Number,
+        reason: String,
+      },
+      gstAdjustment: {
+        originalPercent: Number,
+        adjustedPercent: Number,
+        reason: String,
+      },
+      otherAdjustments: [
+        {
+          description: String,
+          amount: Number,
+          type: {
+            enum: ["Add", "Deduct"],
+          },
+          reason: String,
+        },
+      ],
+    },
+
+    // Notes
+    notes: String,
+
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+  },
+  {
+    timestamps: true,
+  },
+);
+
+invoiceSchema.pre("validate", async function (next) {
+  if (this.isNew && !this.invoiceNumber) {
+    const year = this.year.toString().slice(-2);
+    const month = this.month.toString().padStart(2, "0");
+
+    const lastInvoice = await this.constructor
+      .findOne({
+        month: this.month,
+        year: this.year,
+      })
+      .sort({ createdAt: -1 });
+
+    let sequence = 1;
+
+    if (lastInvoice && lastInvoice.invoiceNumber) {
+      const lastSeq = parseInt(lastInvoice.invoiceNumber.split("-")[2]);
+      if (!isNaN(lastSeq)) sequence = lastSeq + 1;
+    }
+
+    this.invoiceNumber = `INV-${year}${month}-${sequence.toString().padStart(3, "0")}`;
   }
-  
-  // Lock sent invoices
-  if (this.isModified('status') && this.status === 'sent') {
-    this.isLocked = true;
-  }
-  
+
   next();
 });
 
-// Method to check if invoice can be edited
-invoiceSchema.methods.canEdit = function() {
-  return !this.isLocked && ['draft', 'verified'].includes(this.status);
+// Method to calculate totals
+invoiceSchema.methods.calculateTotals = function () {
+  // Calculate subtotal from items
+  this.subtotal = this.items.reduce(
+    (sum, item) => sum + item.proratedAmount,
+    0,
+  );
+
+  // Calculate TDS
+  this.tdsAmount = (this.subtotal * this.tdsPercent) / 100;
+
+  // Calculate GST
+  this.gstAmount = (this.subtotal * this.gstPercent) / 100;
+
+  // Calculate grand total
+  let total = this.subtotal - this.tdsAmount + this.gstAmount;
+
+  // Apply round off
+  this.roundOff = Math.round(total) - total;
+  this.grandTotal = Math.round(total);
+
+  return {
+    subtotal: this.subtotal,
+    tdsAmount: this.tdsAmount,
+    gstAmount: this.gstAmount,
+    roundOff: this.roundOff,
+    grandTotal: this.grandTotal,
+  };
 };
 
-// Method to update payment status
-invoiceSchema.methods.updatePaymentStatus = function(paidAmount) {
-  this.paidAmount = paidAmount;
-  this.balanceDue = this.totalPayable - paidAmount;
-  
-  if (this.balanceDue <= 0) {
-    this.status = 'paid';
-    this.paidDate = new Date();
-  }
-  
-  return this;
-};
+// Virtual for days in month
+invoiceSchema.virtual("daysInMonth").get(function () {
+  return new Date(this.year, this.month, 0).getDate();
+});
 
-const Invoice = mongoose.model('Invoice', invoiceSchema);
-export default Invoice;
+// Indexes
+invoiceSchema.index({ school: 1, month: 1, year: 1 });
+invoiceSchema.index({ status: 1 });
+invoiceSchema.index({ invoiceNumber: 1 });
+invoiceSchema.index({ paymentStatus: 1 });
+invoiceSchema.index({ dueDate: 1 });
+
+export default mongoose.model("Invoice", invoiceSchema);

@@ -19,6 +19,7 @@ const Sidebar = () => {
     { name: 'Schools', href: '/schools', icon: BuildingOfficeIcon },
     { name: 'Employees', href: '/employees', icon: UserGroupIcon },
     { name: 'Postings', href: '/postings', icon: BriefcaseIcon },
+    { name: 'Invoices', href: '/invoices', icon: UserGroupIcon },
   ];
 
   return (

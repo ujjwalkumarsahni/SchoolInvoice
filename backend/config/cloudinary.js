@@ -12,19 +12,30 @@ cloudinary.config({
 // Direct upload helper
 export const uploadToCloudinary = async (file) => {
   try {
-    const result = await cloudinary.uploader.upload(file, {
-      folder: 'school-management',
-      resource_type: 'auto'
+
+    // ✅ Detect base64 PDF
+    let uploadData = file;
+
+    if (!file.startsWith("data:")) {
+      uploadData = `data:application/pdf;base64,${file}`;
+    }
+
+    const result = await cloudinary.uploader.upload(uploadData, {
+      folder: 'school-management/invoices',
+      resource_type: 'raw', // IMPORTANT for PDF
     });
+
     return {
       url: result.secure_url,
       public_id: result.public_id
     };
+
   } catch (error) {
     console.error('Cloudinary upload error:', error);
     throw new Error('File upload failed');
   }
 };
+
 
 // Delete from cloudinary
 export const deleteFromCloudinary = async (publicId) => {

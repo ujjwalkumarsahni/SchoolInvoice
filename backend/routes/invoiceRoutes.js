@@ -1,68 +1,49 @@
+
 // routes/invoiceRoutes.js
 import express from 'express';
 import {
-  generateInvoices,
-  generateSchoolInvoiceController,
+  autoGenerateInvoices,
   getInvoices,
   getInvoice,
-  updateInvoice,
   verifyInvoice,
-  sendInvoices,
-  cancelInvoice,
-  getInvoiceStats
+  sendInvoicesBulk,
+  getInvoiceStats,
+  recordPayment,
+  downloadInvoice,
+  cancelInvoice
 } from '../controllers/invoiceController.js';
-import { protect, authorize, requireAdminOrHR } from '../middleware/auth.js';
+import { authenticate } from '../middleware/auth.js';
+import { requireAdminOrHR } from '../middleware/profileCompletion.js';
 
 const router = express.Router();
 
-// All routes are protected with your authenticate function
-router.use(protect);
+// All routes require authentication and admin access
+router.use(authenticate);
+router.use(requireAdminOrHR);
+// Auto-generate invoices (called by cron job)
+router.post('/auto-generate', autoGenerateInvoices);
 
-// Stats route - Anyone authenticated can view
+// Dashboard stats
 router.get('/stats', getInvoiceStats);
 
-// Generate invoices (admin or superadmin only)
-router.post('/generate', 
-  authorize('admin', 'superadmin'), 
-  generateInvoices
-);
+// Bulk send
+router.post('/send-bulk', sendInvoicesBulk);
 
-// Generate invoice for specific school (admin or superadmin only)
-router.post('/school/:schoolId/generate', 
-  authorize('admin', 'superadmin'), 
-  generateSchoolInvoiceController
-);
-
-// Bulk send invoices (admin or superadmin only)
-router.patch('/send', 
-  authorize('admin', 'superadmin'), 
-  sendInvoices
-);
-
-// Get all invoices (with filters)
+// Invoice CRUD
 router.route('/')
   .get(getInvoices);
 
-// Get single invoice - any authenticated user
 router.route('/:id')
-  .get(getInvoice);
+  .get(getInvoice)
+  .delete(cancelInvoice);
 
-// Update invoice (draft only) - admin, superadmin, or accounts
-router.patch('/:id', 
-  authorize('admin', 'superadmin', 'accounts'), 
-  updateInvoice
-);
+// Verify invoice
+router.put('/:id/verify', verifyInvoice);
 
-// Delete/Cancel invoice (admin or superadmin only)
-router.delete('/:id', 
-  authorize('admin', 'superadmin'), 
-  cancelInvoice
-);
+// Download PDF
+router.get('/:id/download', downloadInvoice);
 
-// Verify invoice (admin or superadmin only)
-router.patch('/:id/verify', 
-  authorize('admin', 'superadmin'), 
-  verifyInvoice
-);
+// Record payment
+router.post('/:id/payment', recordPayment);
 
 export default router;
