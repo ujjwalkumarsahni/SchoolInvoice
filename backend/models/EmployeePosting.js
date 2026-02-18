@@ -19,18 +19,6 @@ const employeePostingSchema = new mongoose.Schema(
       required: [true, "Billing rate is required"],
       min: [0, "Billing rate cannot be negative"],
     },
-    tdsPercent: {
-      type: Number,
-      default: 0,
-      min: 0,
-      max: 100,
-    },
-    gstPercent: {
-      type: Number,
-      default: 0,
-      min: 0,
-      max: 100,
-    },
     startDate: {
       type: Date,
       default: Date.now,
@@ -74,7 +62,7 @@ employeePostingSchema.virtual("totalBilling").get(function () {
     (this.endDate - this.startDate) / (1000 * 60 * 60 * 24),
   );
   const months = days / 30;
-  return this.billingRate * months;
+  return this.monthlyBillingSalary * months;
 });
 
 // ✅ Pre-save validation
@@ -140,7 +128,7 @@ async function handleTrainerUpdate(posting) {
     posting.status === "continue"
   ) {
     //  Validate billing rate before activation
-    if (!posting.billingRate || posting.billingRate <= 0) {
+    if (!posting.monthlyBillingSalary || posting.monthlyBillingSalary <= 0) {
       console.error(`Invalid billing rate for posting ${posting._id}`);
       // Aap yahan error throw kar sakte ho ya default set kar sakte ho
       // throw new Error('Cannot activate posting without valid billing rate');
@@ -179,7 +167,8 @@ async function handleTrainerUpdate(posting) {
 employeePostingSchema.index({ employee: 1, isActive: 1 });
 employeePostingSchema.index({ school: 1, isActive: 1 });
 employeePostingSchema.index({ status: 1 });
-employeePostingSchema.index({ billingRate: 1 });
-employeePostingSchema.index({ school: 1, isActive: 1, billingRate: 1 });
+employeePostingSchema.index({ monthlyBillingSalary: 1 });
+employeePostingSchema.index({ school: 1, isActive: 1, monthlyBillingSalary: 1 });
+
 
 export default mongoose.model("EmployeePosting", employeePostingSchema);

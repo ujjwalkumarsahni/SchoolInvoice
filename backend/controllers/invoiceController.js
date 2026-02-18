@@ -14,222 +14,412 @@ import {
   deleteFromCloudinary,
 } from "../config/cloudinary.js";
 import { sendPaymentReceiptEmail } from "../utils/invoiceUtils.js";
+import { startOfMonth, endOfMonth, subMonths, getDaysInMonth, isWeekend, format, differenceInDays } from "date-fns";
 
 // @desc    Auto-generate invoices for previous month
 // @route   POST /api/invoices/auto-generate
-// @access  Private/Admin (Called by cron job)
+// @access  Private/Admin (Called by cron job on 1st of every month)
 export const autoGenerateInvoices = asyncHandler(async (req, res) => {
-  const { manualMonth, manualYear } = req.body || {};
-  let month, year;
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  // ===== MANUAL MODE =====
-  if (manualMonth && manualYear) {
-    month = manualMonth - 1; // JS month 0-based
-    year = manualYear;
-  }
-  // ===== AUTO/CRON MODE =====
-  else {
-    const today = new Date();
+  try {
+    const { manualMonth, manualYear } = req.body || {};
+    let targetMonth, targetYear;
+    
+    const currentDate = new Date();
+    const today = currentDate.getDate();
+    const currentMonth = currentDate.getMonth() + 1; // 1-12
+    const currentYear = currentDate.getFullYear();
 
-    if (today.getDate() !== 1) {
-      return res.status(400).json({
-        success: false,
-        message: "Provide manualMonth & manualYear for mid-month generation",
+    // ==================== VALIDATION ====================
+    
+    // CASE 1: Manual generation (Admin forcing generation for specific month)
+    if (manualMonth && manualYear) {
+      // Manual mode can only generate previous month's invoice
+      const prevMonth = currentMonth === 1 ? 12 : currentMonth - 1;
+      const prevYear = currentMonth === 1 ? currentYear - 1 : currentYear;
+      
+      if (manualMonth !== prevMonth || manualYear !== prevYear) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(400).json({
+          success: false,
+          message: `You can only generate invoice for previous month: ${prevMonth}/${prevYear}`,
+        });
+      }
+      
+      targetMonth = manualMonth;
+      targetYear = manualYear;
+    }
+    
+    // CASE 2: Auto generation (Cron job - should only run on 1st)
+    else {
+      // Auto mode should only run on 1st of month
+      if (today !== 1) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(400).json({
+          success: false,
+          message: "Auto-generation only runs on 1st of month. Use manual mode for other dates.",
+        });
+      }
+      
+      // Calculate previous month using date-fns (safer)
+      const previousMonthDate = subMonths(currentDate, 1);
+      targetMonth = previousMonthDate.getMonth() + 1; // 1-12
+      targetYear = previousMonthDate.getFullYear();
+    }
+
+    console.log(`🚀 Generating invoices for: Month ${targetMonth}, Year ${targetYear}`);
+
+    // ==================== GET ACTIVE SCHOOLS ====================
+    
+    const schools = await School.find({ 
+      status: "active",
+      // Optional: Only schools with active trainers
+      // currentTrainers: { $exists: true, $ne: [] }
+    }).session(session);
+
+    if (!schools.length) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(200).json({
+        success: true,
+        message: "No active schools found for invoice generation",
+        data: [],
       });
     }
 
-    month = today.getMonth() === 0 ? 11 : today.getMonth() - 1;
-    year =
-      today.getMonth() === 0 ? today.getFullYear() - 1 : today.getFullYear();
-  }
+    // ==================== DATE RANGE FOR TARGET MONTH ====================
+    
+    const startDate = startOfMonth(new Date(targetYear, targetMonth - 1, 1));
+    const endDate = endOfMonth(startDate);
+    const daysInMonth = getDaysInMonth(startDate);
+    
+    console.log(`📅 Date range: ${format(startDate, 'yyyy-MM-dd')} to ${format(endDate, 'yyyy-MM-dd')} (${daysInMonth} days)`);
 
-  const schools = await School.find({ status: "active" });
-  const generatedInvoices = [];
-
-  for (const school of schools) {
-    const alreadyExists = await Invoice.findOne({
-      school: school._id,
-      month: month + 1,
-      year,
-    });
-
-    if (alreadyExists) {
-      console.log(`Invoice already exists for ${school.name}`);
-      continue; // skip this school only
-    }
-    const startDate = new Date(year, month, 1);
-    const endDate = new Date(year, month + 1, 0);
-
-    const postings = await EmployeePosting.find({
-      school: school._id,
-      isActive: true,
-      $or: [
-        { startDate: { $lte: endDate } },
-        { endDate: { $gte: startDate, $lte: endDate } },
-      ],
-    }).populate({
-      path: "employee",
-      select: "basicInfo.fullName basicInfo.employeeId",
-    });
-
-    if (!postings.length) continue;
-
-    // Holidays
+    // ==================== GET ALL HOLIDAYS FOR THE MONTH ====================
+    
     const holidays = await Holiday.find({
-      date: { $gte: startDate, $lte: endDate },
-    });
-
-    const holidayDates = holidays.map(
-      (h) => h.date.toISOString().split("T")[0],
-    );
-
-    const daysInMonth = endDate.getDate();
-    const workingDays = daysInMonth - holidayDates.length;
-
-    const items = [];
-    let subtotal = 0;
-    let totalTds = 0;
-    let totalGst = 0;
-
-    for (const posting of postings) {
-      // ===== BILLABLE PERIOD (JOIN/EXIT PRORATION) =====
-      const billableStart = new Date(
-        Math.max(new Date(posting.startDate), startDate),
-      );
-
-      const billableEnd = posting.endDate
-        ? new Date(Math.min(new Date(posting.endDate), endDate))
-        : endDate;
-
-      // Total billable days in month
-      const billableDays =
-        Math.floor((billableEnd - billableStart) / (1000 * 60 * 60 * 24)) + 1;
-
-      if (billableDays <= 0) continue;
-
-      // Leaves
-      const leaves = await Leave.find({
-        employee: posting.employee._id,
-        fromDate: { $lte: endDate },
-        toDate: { $gte: startDate },
-        status: "Approved",
-      });
-
-      let leaveDays = 0;
-
-      leaves.forEach((leave) => {
-        const leaveStart = new Date(Math.max(leave.fromDate, billableStart));
-
-        const leaveEnd = new Date(Math.min(leave.toDate, billableEnd));
-
-        for (
-          let d = new Date(leaveStart);
-          d <= leaveEnd;
-          d.setDate(d.getDate() + 1)
-        ) {
-          const dateStr = d.toISOString().split("T")[0];
-          if (!holidayDates.includes(dateStr)) leaveDays++;
-        }
-      });
-
-      const actualWorkingDays = Math.max(0, billableDays - leaveDays);
-
-      // ⭐ Correct daily rate (based on working days)
-      const dailyRate = posting.monthlyBillingSalary / daysInMonth;
-
-      const proratedAmount = Math.round(dailyRate * actualWorkingDays);
-
-      const tdsAmount = Math.round(
-        (proratedAmount * (posting.tdsPercent || 0)) / 100,
-      );
-
-      const gstAmount = Math.round(
-        (proratedAmount * (posting.gstPercent || 0)) / 100,
-      );
-
-      const item = {
-        employee: posting.employee._id,
-        employeeName: posting.employee.basicInfo.fullName,
-        employeeId: posting.employee.basicInfo.employeeId,
-        monthlyBillingSalary: posting.monthlyBillingSalary,
-        leaveDays,
-        leaveDeduction: Math.round(dailyRate * leaveDays),
-        workingDays: billableDays,
-        actualWorkingDays,
-        proratedAmount,
-        tdsPercent: posting.tdsPercent || 0,
-        tdsAmount,
-        gstPercent: posting.gstPercent || 0,
-        gstAmount,
-        subtotal: proratedAmount,
-      };
-
-      items.push(item);
-
-      subtotal += proratedAmount;
-      totalTds += tdsAmount;
-      totalGst += gstAmount;
-    }
-
-    // ===== GET PREVIOUS DUE =====
-    const prevInvoice = await Invoice.findOne({
-      school: school._id,
-      paymentStatus: { $in: ["Partial", "Unpaid"] },
-    }).sort({ createdAt: -1 });
-
-    let previousDue = 0;
-
-    if (prevInvoice) {
-      previousDue = prevInvoice.grandTotal - (prevInvoice.paidAmount || 0);
-    }
-
-    // ===== FINAL TOTAL =====
-    const grandTotal = subtotal - totalTds + totalGst + previousDue;
-
-    const invoice = await Invoice.create({
-      school: school._id,
-      schoolDetails: {
-        name: school.name,
-        city: school.city,
-        address: school.address,
-        contactPersonName: school.contactPersonName,
-        mobile: school.mobile,
-        email: school.email,
+      date: { 
+        $gte: startDate, 
+        $lte: endDate 
       },
-      month: month + 1,
-      year,
-      items,
-      subtotal,
-      previousDue,
-      tdsAmount: totalTds,
-      gstAmount: totalGst,
-      grandTotal,
-      status: "Generated",
-      generatedBy: req.user?._id,
-      generatedAt: new Date(),
-    });
+    }).session(session);
 
-    // Ledger
-    await SchoolLedger.create({
-      school: school._id,
-      invoice: invoice._id,
-      transactionType: "Invoice Generated",
-      amount: grandTotal,
-      balance: grandTotal,
-      month: month + 1,
-      year,
-      description: `Invoice for ${month + 1}/${year}`,
-      createdBy: req.user?._id,
-    });
+    const holidaySet = new Set(
+      holidays.map(h => format(h.date, 'yyyy-MM-dd'))
+    );
+    
+    console.log(`🎉 Total holidays: ${holidaySet.size}`);
 
-    generatedInvoices.push(invoice);
+    // ==================== PROCESS EACH SCHOOL ====================
+    
+    const generatedInvoices = [];
+    const skippedSchools = [];
+    const failedSchools = [];
+
+    for (const school of schools) {
+      try {
+        // Check if invoice already exists for this school/month/year
+        const existingInvoice = await Invoice.findOne({
+          school: school._id,
+          month: targetMonth,
+          year: targetYear,
+          status: { $ne: "Cancelled" } // Don't regenerate if cancelled
+        }).session(session);
+
+        if (existingInvoice) {
+          console.log(`⏭️ Invoice already exists for ${school.name}`);
+          skippedSchools.push({
+            school: school.name,
+            reason: "Invoice already exists"
+          });
+          continue;
+        }
+
+        // ==================== GET ACTIVE EMPLOYEE POSTINGS ====================
+        
+        const postings = await EmployeePosting.find({
+          school: school._id,
+          isActive: true,
+          monthlyBillingSalary: { $gt: 0 }, // Only those with valid billing rate
+          $or: [
+            { 
+              startDate: { $lte: endDate },
+              $or: [
+                { endDate: null },
+                { endDate: { $gte: startDate } }
+              ]
+            }
+          ]
+        })
+        .populate({
+          path: "employee",
+          select: "basicInfo.fullName basicInfo.employeeId basicInfo.designation",
+        })
+        .session(session);
+
+        if (!postings.length) {
+          console.log(`⏭️ No active employees for ${school.name}`);
+          skippedSchools.push({
+            school: school.name,
+            reason: "No active employees"
+          });
+          continue;
+        }
+
+        console.log(`👥 Processing ${school.name} - ${postings.length} employees`);
+
+        // ==================== PROCESS EACH EMPLOYEE ====================
+        
+        const items = [];
+        let subtotal = 0;
+        let totalTds = 0;
+        let totalGst = 0;
+
+        for (const posting of postings) {
+          if (!posting.employee) {
+            console.warn(`⚠️ Posting ${posting._id} has no employee reference`);
+            continue;
+          }
+
+          // Calculate billable days for this employee in the month
+          const billableStart = new Date(Math.max(
+            posting.startDate.getTime(),
+            startDate.getTime()
+          ));
+          
+          const billableEnd = posting.endDate 
+            ? new Date(Math.min(posting.endDate.getTime(), endDate.getTime()))
+            : endDate;
+
+          // If no overlap with month, skip
+          if (billableStart > billableEnd) {
+            continue;
+          }
+
+          // Calculate total billable days (including weekends)
+          const totalBillableDays = differenceInDays(billableEnd, billableStart) + 1;
+          
+          if (totalBillableDays <= 0) continue;
+
+          // ==================== GET APPROVED LEAVES ====================
+          
+          const leaves = await Leave.find({
+            employee: posting.employee._id,
+            status: "Approved",
+            $or: [
+              {
+                fromDate: { $lte: endDate },
+                toDate: { $gte: startDate }
+              }
+            ]
+          }).session(session);
+
+          // Calculate leave days (excluding holidays)
+          const leaveDaysSet = new Set();
+          
+          for (const leave of leaves) {
+            const leaveStart = new Date(Math.max(leave.fromDate, billableStart));
+            const leaveEnd = new Date(Math.min(leave.toDate, billableEnd));
+            
+            // Iterate through each day of leave
+            for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
+              const dateStr = format(d, 'yyyy-MM-dd');
+              
+              // Don't count as leave if it's a holiday
+              if (!holidaySet.has(dateStr)) {
+                leaveDaysSet.add(dateStr);
+              }
+            }
+          }
+
+          const leaveDays = leaveDaysSet.size;
+          
+          // Calculate working days (billable days - leaves)
+          // Note: Weekends are already included in billable days
+          const actualWorkingDays = Math.max(0, totalBillableDays - leaveDays);
+          
+          // Calculate prorated amount
+          const dailyRate = posting.monthlyBillingSalary / daysInMonth;
+          const proratedAmount = Math.round(dailyRate * actualWorkingDays);
+
+          // Calculate TDS and GST (school level rates)
+          const tdsAmount = Math.round((proratedAmount * (school.tdsPercent || 0)) / 100);
+          const gstAmount = Math.round((proratedAmount * (school.gstPercent || 0)) / 100);
+
+          // Create item
+          const item = {
+            employee: posting.employee._id,
+            employeeName: posting.employee.basicInfo?.fullName || "Unknown",
+            employeeId: posting.employee.basicInfo?.employeeId || "N/A",
+            monthlyBillingSalary: posting.monthlyBillingSalary,
+            leaveDays,
+            leaveDeduction: Math.round(dailyRate * leaveDays),
+            workingDays: totalBillableDays,
+            actualWorkingDays,
+            proratedAmount,
+            tdsPercent: school.tdsPercent || 0,
+            tdsAmount,
+            gstPercent: school.gstPercent || 0,
+            gstAmount,
+            subtotal: proratedAmount,
+          };
+
+          items.push(item);
+          
+          subtotal += proratedAmount;
+          totalTds += tdsAmount;
+          totalGst += gstAmount;
+        }
+
+        // If no valid items after processing, skip
+        if (!items.length) {
+          console.log(`⏭️ No valid invoice items for ${school.name}`);
+          skippedSchools.push({
+            school: school.name,
+            reason: "No valid invoice items"
+          });
+          continue;
+        }
+
+        // ==================== CHECK FOR PREVIOUS DUE ====================
+        
+        const previousDueInvoice = await Invoice.findOne({
+          school: school._id,
+          paymentStatus: { $in: ["Unpaid", "Partial"] },
+          grandTotal: { $gt: 0 }
+        })
+        .sort({ createdAt: -1 })
+        .session(session);
+
+        let previousDue = 0;
+        if (previousDueInvoice) {
+          previousDue = Math.max(
+            0,
+            previousDueInvoice.grandTotal - (previousDueInvoice.paidAmount || 0)
+          );
+        }
+
+        // ==================== CALCULATE GRAND TOTAL ====================
+        
+        const grandTotal = subtotal - totalTds + totalGst + previousDue;
+
+        // ==================== CREATE INVOICE ====================
+        
+        const invoiceData = {
+          school: school._id,
+          schoolDetails: {
+            name: school.name,
+            city: school.city,
+            address: school.address,
+            contactPersonName: school.contactPersonName,
+            mobile: school.mobile,
+            email: school.email,
+          },
+          month: targetMonth,
+          year: targetYear,
+          items,
+          subtotal,
+          previousDue, // Add this to schema if not exists
+          tdsPercent: school.tdsPercent || 0,
+          tdsAmount: totalTds,
+          gstPercent: school.gstPercent || 0,
+          gstAmount: totalGst,
+          grandTotal,
+          status: "Generated",
+          paymentStatus: previousDue > 0 ? "Partial" : "Unpaid",
+          generatedBy: req.user?._id || null,
+          generatedAt: new Date(),
+          createdBy: req.user?._id || null,
+        };
+
+        const invoice = await Invoice.create([invoiceData], { session });
+
+        // ==================== UPDATE LEDGER ====================
+        
+        await SchoolLedger.create([{
+          school: school._id,
+          invoice: invoice[0]._id,
+          transactionType: "Invoice Generated",
+          amount: grandTotal,
+          balance: grandTotal,
+          month: targetMonth,
+          year: targetYear,
+          description: `Invoice generated for ${targetMonth}/${targetYear}`,
+          createdBy: req.user?._id || null,
+          date: new Date(),
+        }], { session });
+
+        generatedInvoices.push(invoice[0]);
+        console.log(`✅ Invoice generated for ${school.name}: ${invoice[0].invoiceNumber} - ₹${grandTotal}`);
+
+      } catch (schoolError) {
+        console.error(`❌ Error processing school ${school.name}:`, schoolError);
+        failedSchools.push({
+          school: school.name,
+          error: schoolError.message
+        });
+        // Continue with next school, don't break the loop
+      }
+    }
+
+    // ==================== COMMIT TRANSACTION ====================
+    
+    await session.commitTransaction();
+    session.endSession();
+
+    // ==================== SEND RESPONSE ====================
+    
+    const response = {
+      success: true,
+      message: `Invoice generation completed`,
+      data: {
+        generated: generatedInvoices.map(inv => ({
+          id: inv._id,
+          invoiceNumber: inv.invoiceNumber,
+          school: inv.schoolDetails.name,
+          amount: inv.grandTotal,
+          month: inv.month,
+          year: inv.year,
+        })),
+        summary: {
+          total: generatedInvoices.length,
+          skipped: skippedSchools.length,
+          failed: failedSchools.length,
+        },
+        skipped: skippedSchools,
+        failed: failedSchools,
+      },
+    };
+
+    // Log summary
+    console.log("\n========== INVOICE GENERATION SUMMARY ==========");
+    console.log(`✅ Generated: ${generatedInvoices.length} invoices`);
+    console.log(`⏭️ Skipped: ${skippedSchools.length} schools`);
+    console.log(`❌ Failed: ${failedSchools.length} schools`);
+    console.log(`💰 Total Amount: ₹${generatedInvoices.reduce((sum, inv) => sum + inv.grandTotal, 0)}`);
+    console.log("================================================\n");
+
+    res.status(201).json(response);
+
+  } catch (error) {
+    // ==================== ROLLBACK ON ERROR ====================
+    
+    await session.abortTransaction();
+    session.endSession();
+    
+    console.error("❌ Invoice generation failed:", error);
+    
+    res.status(500).json({
+      success: false,
+      message: "Invoice generation failed",
+      error: error.message,
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
   }
-
-  res.status(201).json({
-    success: true,
-    message: `Generated ${generatedInvoices.length} invoices`,
-    data: generatedInvoices,
-  });
 });
 
 // @desc    Get all invoices with filters
@@ -328,14 +518,128 @@ export const getInvoice = asyncHandler(async (req, res) => {
 // @desc    Verify invoice (Admin can customize before verify)
 // @route   PUT /api/invoices/:id/verify
 // @access  Private/Admin
+// export const verifyInvoice = asyncHandler(async (req, res) => {
+//   const { id } = req.params;
+//   const {
+//     tdsPercent,
+//     gstPercent,
+//     items, // Modified items (with adjusted leave days)
+//     leaveAdjustments,
+//     notes,
+//   } = req.body;
+
+//   const invoice = await Invoice.findById(id);
+
+//   if (!invoice) {
+//     return res.status(404).json({
+//       success: false,
+//       message: "Invoice not found",
+//     });
+//   }
+
+//   if (invoice.status !== "Generated") {
+//     return res.status(400).json({
+//       success: false,
+//       message: `Invoice cannot be verified. Current status: ${invoice.status}`,
+//     });
+//   }
+
+//   // Store original values for customization tracking
+//   const originalTdsPercent = invoice.tdsPercent;
+//   const originalGstPercent = invoice.gstPercent;
+//   const originalItems = [...invoice.items];
+
+//   // Apply customizations
+//   if (tdsPercent !== undefined && tdsPercent !== invoice.tdsPercent) {
+//     invoice.customizations.tdsAdjustment = {
+//       originalPercent: originalTdsPercent,
+//       adjustedPercent: tdsPercent,
+//       reason: "Admin adjusted TDS",
+//       adjustedBy: req.user._id,
+//       adjustedAt: new Date(),
+//     };
+//     invoice.tdsPercent = tdsPercent;
+//   }
+
+//   if (gstPercent !== undefined && gstPercent !== invoice.gstPercent) {
+//     invoice.customizations.gstAdjustment = {
+//       originalPercent: originalGstPercent,
+//       adjustedPercent: gstPercent,
+//       reason: "Admin adjusted GST",
+//       adjustedBy: req.user._id,
+//       adjustedAt: new Date(),
+//     };
+//     invoice.gstPercent = gstPercent;
+//   }
+
+//   // Update items if provided
+//   if (items && Array.isArray(items)) {
+//     const leaveAdjustmentsList = [];
+
+//     items.forEach((modifiedItem, index) => {
+//       const originalItem = originalItems[index];
+
+//       if (originalItem && modifiedItem.leaveDays !== originalItem.leaveDays) {
+//         leaveAdjustmentsList.push({
+//           employee: originalItem.employee,
+//           originalLeaveDays: originalItem.leaveDays,
+//           adjustedLeaveDays: modifiedItem.leaveDays,
+//           reason: modifiedItem.reason || "Admin adjusted leave days",
+//           adjustedBy: req.user._id,
+//           adjustedAt: new Date(),
+//         });
+
+//         // Recalculate for this item
+//         const dailyRate =
+//           originalItem.monthlyBillingSalary / originalItem.workingDays;
+
+//         const leaveDeduction = dailyRate * modifiedItem.leaveDays;
+//         const actualWorkingDays =
+//           originalItem.workingDays - modifiedItem.leaveDays;
+//         const proratedAmount = dailyRate * actualWorkingDays;
+
+//         invoice.items[index].leaveDays = modifiedItem.leaveDays;
+//         invoice.items[index].leaveDeduction = leaveDeduction;
+//         invoice.items[index].actualWorkingDays = actualWorkingDays;
+//         invoice.items[index].proratedAmount = Math.round(proratedAmount);
+//         invoice.items[index].subtotal = Math.round(proratedAmount);
+//       }
+//     });
+
+//     invoice.customizations.leaveAdjustments = leaveAdjustmentsList;
+//   }
+
+//   // Recalculate totals
+//   invoice.calculateTotals();
+
+//   // Update invoice
+//   invoice.status = "Verified";
+//   invoice.verifiedBy = req.user._id;
+//   invoice.verifiedAt = new Date();
+//   invoice.notes = notes || invoice.notes;
+//   invoice.updatedBy = req.user._id;
+
+//   await invoice.save();
+
+//   res.json({
+//     success: true,
+//     message: "Invoice verified successfully",
+//     data: invoice,
+//   });
+// });
+
+
+// @desc    Verify invoice (Admin can customize before verify)
+// @route   PUT /api/invoices/:id/verify
+// @access  Private/Admin
 export const verifyInvoice = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const {
     tdsPercent,
     gstPercent,
     items, // Modified items (with adjusted leave days)
-    leaveAdjustments,
     notes,
+    forceReVerify = false, // New flag for re-verification
   } = req.body;
 
   const invoice = await Invoice.findById(id);
@@ -347,10 +651,21 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
     });
   }
 
-  if (invoice.status !== "Generated") {
+  // 🟢 IMPROVED: Allow re-verification with proper checks
+  const allowedStatuses = ["Generated", "Verified"]; // ✅ Now Verified is also allowed
+  
+  if (!allowedStatuses.includes(invoice.status)) {
     return res.status(400).json({
       success: false,
-      message: `Invoice cannot be verified. Current status: ${invoice.status}`,
+      message: `Invoice cannot be verified. Current status: ${invoice.status}. Allowed statuses: Generated, Verified`,
+    });
+  }
+
+  // 🟢 If already verified, require forceReVerify flag
+  if (invoice.status === "Verified" && !forceReVerify) {
+    return res.status(400).json({
+      success: false,
+      message: "Invoice is already verified. Use forceReVerify=true to modify and re-verify",
     });
   }
 
@@ -359,56 +674,89 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
   const originalGstPercent = invoice.gstPercent;
   const originalItems = [...invoice.items];
 
-  // Apply customizations
+  // Track what changed
+  const changes = [];
+
+  // Apply TDS customizations
   if (tdsPercent !== undefined && tdsPercent !== invoice.tdsPercent) {
-    invoice.customizations.tdsAdjustment = {
-      originalPercent: originalTdsPercent,
-      adjustedPercent: tdsPercent,
-      reason: "Admin adjusted TDS",
-      adjustedBy: req.user._id,
-      adjustedAt: new Date(),
-    };
+    changes.push(`TDS changed from ${originalTdsPercent}% to ${tdsPercent}%`);
+    
+    // If there was a previous adjustment, update it instead of creating new
+    if (invoice.customizations.tdsAdjustment && invoice.status === "Verified") {
+      invoice.customizations.tdsAdjustment.previousPercent = invoice.customizations.tdsAdjustment.adjustedPercent;
+      invoice.customizations.tdsAdjustment.adjustedPercent = tdsPercent;
+      invoice.customizations.tdsAdjustment.reason = "Admin re-adjusted TDS during re-verification";
+      invoice.customizations.tdsAdjustment.adjustedBy = req.user._id;
+      invoice.customizations.tdsAdjustment.adjustedAt = new Date();
+    } else {
+      invoice.customizations.tdsAdjustment = {
+        originalPercent: originalTdsPercent,
+        adjustedPercent: tdsPercent,
+        reason: "Admin adjusted TDS",
+        adjustedBy: req.user._id,
+        adjustedAt: new Date(),
+      };
+    }
     invoice.tdsPercent = tdsPercent;
   }
 
+  // Apply GST customizations
   if (gstPercent !== undefined && gstPercent !== invoice.gstPercent) {
-    invoice.customizations.gstAdjustment = {
-      originalPercent: originalGstPercent,
-      adjustedPercent: gstPercent,
-      reason: "Admin adjusted GST",
-      adjustedBy: req.user._id,
-      adjustedAt: new Date(),
-    };
+    changes.push(`GST changed from ${originalGstPercent}% to ${gstPercent}%`);
+    
+    if (invoice.customizations.gstAdjustment && invoice.status === "Verified") {
+      invoice.customizations.gstAdjustment.previousPercent = invoice.customizations.gstAdjustment.adjustedPercent;
+      invoice.customizations.gstAdjustment.adjustedPercent = gstPercent;
+      invoice.customizations.gstAdjustment.reason = "Admin re-adjusted GST during re-verification";
+      invoice.customizations.gstAdjustment.adjustedBy = req.user._id;
+      invoice.customizations.gstAdjustment.adjustedAt = new Date();
+    } else {
+      invoice.customizations.gstAdjustment = {
+        originalPercent: originalGstPercent,
+        adjustedPercent: gstPercent,
+        reason: "Admin adjusted GST",
+        adjustedBy: req.user._id,
+        adjustedAt: new Date(),
+      };
+    }
     invoice.gstPercent = gstPercent;
   }
 
   // Update items if provided
   if (items && Array.isArray(items)) {
-    const leaveAdjustmentsList = [];
+    const leaveAdjustmentsList = invoice.customizations.leaveAdjustments || [];
 
     items.forEach((modifiedItem, index) => {
       const originalItem = originalItems[index];
 
       if (originalItem && modifiedItem.leaveDays !== originalItem.leaveDays) {
+        changes.push(`Leave days for ${originalItem.employeeName} changed from ${originalItem.leaveDays} to ${modifiedItem.leaveDays}`);
+        
         leaveAdjustmentsList.push({
           employee: originalItem.employee,
           originalLeaveDays: originalItem.leaveDays,
           adjustedLeaveDays: modifiedItem.leaveDays,
-          reason: modifiedItem.reason || "Admin adjusted leave days",
+          reason: modifiedItem.reason || (invoice.status === "Verified" ? "Admin re-adjusted leave days" : "Admin adjusted leave days"),
           adjustedBy: req.user._id,
           adjustedAt: new Date(),
         });
 
-        // Recalculate for this item
-        const dailyRate =
-          originalItem.monthlyBillingSalary / invoice.daysInMonth;
+        // ✅ FIXED: Calculate correctly based on working days
+        const daysInMonth = new Date(invoice.year, invoice.month, 0).getDate();
+        const workingDays = originalItem.workingDays || daysInMonth;
+        
+        // Daily rate based on actual working days in month
+        const dailyRate = originalItem.monthlyBillingSalary / workingDays;
+
         const leaveDeduction = dailyRate * modifiedItem.leaveDays;
-        const actualWorkingDays =
-          originalItem.workingDays - modifiedItem.leaveDays;
+        const actualWorkingDays = workingDays - modifiedItem.leaveDays;
+        
+        // ✅ CORRECT: prorated amount = monthly salary for working days - leave deduction
+        // OR: daily rate × actual working days
         const proratedAmount = dailyRate * actualWorkingDays;
 
         invoice.items[index].leaveDays = modifiedItem.leaveDays;
-        invoice.items[index].leaveDeduction = leaveDeduction;
+        invoice.items[index].leaveDeduction = Math.round(leaveDeduction);
         invoice.items[index].actualWorkingDays = actualWorkingDays;
         invoice.items[index].proratedAmount = Math.round(proratedAmount);
         invoice.items[index].subtotal = Math.round(proratedAmount);
@@ -421,25 +769,161 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
   // Recalculate totals
   invoice.calculateTotals();
 
+  // 🟢 Track verification history
+  if (!invoice.verificationHistory) {
+    invoice.verificationHistory = [];
+  }
+  
+  invoice.verificationHistory.push({
+    verifiedBy: req.user._id,
+    verifiedAt: new Date(),
+    status: invoice.status === "Verified" ? "Re-verified" : "Verified",
+    changes: changes.length > 0 ? changes : ["No changes made"],
+    notes: notes || (invoice.status === "Verified" ? "Re-verified invoice" : "Initial verification"),
+  });
+
   // Update invoice
   invoice.status = "Verified";
   invoice.verifiedBy = req.user._id;
   invoice.verifiedAt = new Date();
-  invoice.notes = notes || invoice.notes;
+  invoice.notes = notes ? 
+    (invoice.notes ? `${invoice.notes}\n\n[${new Date().toLocaleDateString()}] Re-verification: ${notes}` : notes) : 
+    invoice.notes;
   invoice.updatedBy = req.user._id;
 
   await invoice.save();
 
+  // Populate for response
+  await invoice.populate([
+    { path: "verifiedBy", select: "name email" },
+    { path: "verificationHistory.verifiedBy", select: "name email" },
+  ]);
+
+  const message = invoice.verificationHistory.length > 1 
+    ? "Invoice re-verified successfully" 
+    : "Invoice verified successfully";
+
   res.json({
     success: true,
-    message: "Invoice verified successfully",
+    message,
     data: invoice,
+    reVerification: invoice.verificationHistory.length > 1,
+    changes: changes,
   });
 });
 
-// @desc    Send invoices to schools (bulk)
-// @route   POST /api/invoices/send-bulk
+// controllers/invoiceController.js - Add this new function
+
+// @desc    Resend invoice to school (for already sent invoices)
+// @route   POST /api/invoices/:id/resend
 // @access  Private/Admin
+export const resendInvoice = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+
+  const invoice = await Invoice.findById(id).populate('school');
+
+  if (!invoice) {
+    return res.status(404).json({
+      success: false,
+      message: "Invoice not found",
+    });
+  }
+
+  // ✅ Allow resend for Sent and Verified invoices
+  if (!['Sent', 'Verified'].includes(invoice.status)) {
+    return res.status(400).json({
+      success: false,
+      message: `Invoice cannot be resent. Current status: ${invoice.status}. Allowed: Sent, Verified`,
+    });
+  }
+
+  // Check if school email exists
+  if (!invoice.schoolDetails?.email && !invoice.school?.email) {
+    return res.status(400).json({
+      success: false,
+      message: "School email not found. Cannot send invoice.",
+    });
+  }
+
+  try {
+    // Generate fresh PDF
+    const pdfResult = await generateInvoicePDF(invoice);
+
+    // Upload to Cloudinary (optional - update if changed)
+    let pdfUrl = invoice.pdfUrl;
+    let pdfPublicId = invoice.pdfPublicId;
+
+    if (!pdfUrl || req.body.regeneratePDF) {
+      const uploadResult = await uploadToCloudinary(pdfResult.base64, {
+        folder: "invoices",
+        public_id: `invoice_${invoice.invoiceNumber}_${Date.now()}`,
+        resource_type: "raw",
+      });
+      
+      pdfUrl = uploadResult.secure_url;
+      pdfPublicId = uploadResult.public_id;
+    }
+
+    // Send email to school
+    const emailSent = await sendInvoiceEmail(
+      invoice.schoolDetails?.email || invoice.school?.email,
+      invoice,
+      pdfResult.buffer,
+      { isResend: true } // Flag for email template
+    );
+
+    if (emailSent) {
+      // Update invoice
+      invoice.status = "Sent";
+      invoice.sentAt = new Date();
+      invoice.sentBy = req.user._id;
+      
+      // Update PDF if new one was generated
+      if (pdfUrl) {
+        invoice.pdfUrl = pdfUrl;
+        invoice.pdfPublicId = pdfPublicId;
+      }
+
+      // Track resend history
+      if (!invoice.resendHistory) {
+        invoice.resendHistory = [];
+      }
+      
+      invoice.resendHistory.push({
+        resentBy: req.user._id,
+        resentAt: new Date(),
+        reason: reason || "Resent to school",
+        previousSentAt: invoice.sentAt,
+      });
+
+      await invoice.save();
+
+      res.json({
+        success: true,
+        message: "Invoice resent successfully",
+        data: {
+          invoiceNumber: invoice.invoiceNumber,
+          sentAt: invoice.sentAt,
+          email: invoice.schoolDetails?.email || invoice.school?.email,
+        },
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        message: "Failed to send email. Please check email configuration.",
+      });
+    }
+  } catch (error) {
+    console.error(`Error resending invoice ${invoice.invoiceNumber}:`, error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to resend invoice",
+    });
+  }
+});
+
+// Update sendInvoicesBulk to also track history
 export const sendInvoicesBulk = asyncHandler(async (req, res) => {
   const { invoiceIds } = req.body;
 
@@ -450,15 +934,16 @@ export const sendInvoicesBulk = asyncHandler(async (req, res) => {
     });
   }
 
+  // ✅ Allow sending both Verified and Sent invoices
   const invoices = await Invoice.find({
     _id: { $in: invoiceIds },
-    status: { $in: ["Verified", "Sent"] },
+    status: { $in: ['Verified', 'Sent'] } // Allow both
   }).populate("school");
 
   if (invoices.length === 0) {
     return res.status(400).json({
       success: false,
-      message: "No verified invoices found to send",
+      message: "No verified or sent invoices found to send",
     });
   }
 
@@ -473,27 +958,40 @@ export const sendInvoicesBulk = asyncHandler(async (req, res) => {
       // Upload to Cloudinary
       const uploadResult = await uploadToCloudinary(pdfResult.base64, {
         folder: "invoices",
-        public_id: `invoice_${invoice.invoiceNumber}`,
+        public_id: `invoice_${invoice.invoiceNumber}_${Date.now()}`,
         resource_type: "raw",
       });
 
-      // Update invoice with PDF URL
-      invoice.pdfUrl = uploadResult.secure_url;
-      invoice.pdfPublicId = uploadResult.public_id;
-
-      // Send email to school
+      // Send email
       const emailSent = await sendInvoiceEmail(
-        invoice.school.email,
+        invoice.schoolDetails?.email || invoice.school?.email,
         invoice,
         pdfResult.buffer,
+        { isResend: invoice.status === 'Sent' } // Flag for resend
       );
 
       if (emailSent) {
+        const oldStatus = invoice.status;
+        
         invoice.status = "Sent";
         invoice.sentAt = new Date();
         invoice.sentBy = req.user._id;
-        await invoice.save();
+        invoice.pdfUrl = uploadResult.secure_url;
+        invoice.pdfPublicId = uploadResult.public_id;
 
+        // Track resend if it was already sent
+        if (oldStatus === 'Sent') {
+          if (!invoice.resendHistory) {
+            invoice.resendHistory = [];
+          }
+          invoice.resendHistory.push({
+            resentBy: req.user._id,
+            resentAt: new Date(),
+            reason: "Bulk resend",
+          });
+        }
+
+        await invoice.save();
         sentInvoices.push(invoice.invoiceNumber);
       } else {
         failedInvoices.push(invoice.invoiceNumber);
@@ -576,6 +1074,8 @@ export const getInvoiceStats = asyncHandler(async (req, res) => {
 // @desc    Record payment for invoice
 // @route   POST /api/invoices/:id/payment
 // @access  Private/Admin
+// controllers/invoiceController.js - Update recordPayment
+
 export const recordPayment = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const {
@@ -605,7 +1105,7 @@ export const recordPayment = asyncHandler(async (req, res) => {
   }
 
   // Calculate new paid amount
-  const newPaidAmount = invoice.paidAmount + amount;
+  const newPaidAmount = (invoice.paidAmount || 0) + Number(amount);
 
   if (newPaidAmount > invoice.grandTotal) {
     return res.status(400).json({
@@ -616,15 +1116,14 @@ export const recordPayment = asyncHandler(async (req, res) => {
 
   // Generate payment number
   const paymentCount = await Payment.countDocuments();
-
   const paymentNumber = `PAY-${new Date().getFullYear()}-${String(paymentCount + 1).padStart(4, "0")}`;
 
+  // Create payment record
   const payment = await Payment.create({
     paymentNumber,
-
     school: invoice.school,
     invoices: [invoice._id],
-    amount: amount,
+    amount: Number(amount),
     paymentDate: paymentDate || new Date(),
     paymentMethod: paymentMethod,
     referenceNumber: referenceNumber,
@@ -636,10 +1135,26 @@ export const recordPayment = asyncHandler(async (req, res) => {
     createdBy: req.user._id,
   });
 
+  // 🟢 ADD TO PAYMENT HISTORY
+  if (!invoice.paymentHistory) {
+    invoice.paymentHistory = [];
+  }
+  
+  invoice.paymentHistory.push({
+    amount: Number(amount),
+    paymentDate: paymentDate || new Date(),
+    paymentMethod,
+    referenceNumber,
+    bankName,
+    branch,
+    remarks,
+    receivedBy: req.user._id,
+    recordedAt: new Date()
+  });
+
   // Update invoice
   invoice.paidAmount = newPaidAmount;
-  invoice.paymentStatus =
-    newPaidAmount === invoice.grandTotal ? "Paid" : "Partial";
+  invoice.paymentStatus = newPaidAmount === invoice.grandTotal ? "Paid" : "Partial";
   invoice.paidAt = new Date();
   invoice.updatedBy = req.user._id;
 
@@ -650,7 +1165,7 @@ export const recordPayment = asyncHandler(async (req, res) => {
     school: invoice.school,
     invoice: invoice._id,
     transactionType: "Payment Received",
-    amount: -amount, // Negative for credit
+    amount: -Number(amount),
     balance: invoice.grandTotal - newPaidAmount,
     month: invoice.month,
     year: invoice.year,
@@ -660,6 +1175,7 @@ export const recordPayment = asyncHandler(async (req, res) => {
     createdBy: req.user._id,
   });
 
+  // Send receipt email
   await sendPaymentReceiptEmail(invoice.schoolDetails.email, invoice, payment);
 
   res.json({

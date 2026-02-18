@@ -1,793 +1,3 @@
-import Employee from "../models/Employee.js";
-import User from "../models/User.js";
-import UserActivity from "../models/UserActivity.js";
-import UserRole from "../models/UserRole.js";
-
-
-// HR creates employee with basic info
-export const createEmployee = async (req, res) => {
-  try {
-    const {
-      name,
-      email,
-      password,
-      employeeId,
-      designation,
-      department,
-      reportingManager,
-      dateOfJoining,
-      employmentType,
-      workMode,
-      workLocation,
-      salary,
-      organization,
-      role = "employee",
-    } = req.body;
-
-    // Validate required fields
-    if (
-      !name ||
-      !email ||
-      !password ||
-      !employeeId ||
-      !designation ||
-      !department ||
-      !reportingManager ||
-      !dateOfJoining ||
-      !employmentType ||
-      !workMode ||
-      !workLocation ||
-      !salary
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "All fields are required",
-      });
-    }
-
-    // Validate password strength
-    if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: "Password must be at least 6 characters long",
-      });
-    }
-
-    if (req.user.role !== "admin" && role === "admin") {
-      return res.status(403).json({
-        success: false,
-        message: "Only admin can create admin account.",
-      });
-    }
-    // Check if user already exists
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).json({
-        success: false,
-        message: "User with this email already exists",
-      });
-    }
-
-    // Check if employee ID already exists
-    const existingEmployee = await Employee.findOne({
-      "basicInfo.employeeId": employeeId,
-    });
-    if (existingEmployee) {
-      return res.status(400).json({
-        success: false,
-        message: "Employee ID already exists",
-      });
-    }
-
-    // Create user account
-    const user = new User({
-      name,
-      email,
-      passwordHash: password,
-      role: role,
-      organization: organization || "",
-    });
-
-    await user.save();
-
-    await UserRole.create({
-      user: user._id,
-      role: role || "employee",
-      assignedBy: req.user._id,
-      isActive: true,
-    });
-
-    // Assign default permissions based on role
-    // const defaultPermissions = await Permission.findOne({ role });
-    // const userRole = new UserRole({
-    //     user: user._id,
-    //     role: role,
-    //     permissions: defaultPermissions?._id || null
-    // });
-
-    // await userRole.save();
-
-    // Create employee profile with basic info
-    const employee = new Employee({
-      user: user._id,
-      basicInfo: {
-        fullName: name,
-        employeeId,
-        designation,
-        department,
-        reportingManager,
-        dateOfJoining: new Date(dateOfJoining),
-        employmentType,
-        workMode,
-        workLocation,
-        salary: salary || 0,
-        employeeStatus: "Active",
-      },
-      createdBy: req.user._id,
-      lastUpdatedBy: req.user._id,
-    });
-
-    await employee.save();
-
-    // console.log(employee)
-    // Send welcome email to employee
-    // await sendWelcomeEmail(email, name, employeeId, password);
-
-    // Log registration activity
-    await UserActivity.create({
-      user: user._id,
-      action: "user_created",
-      resourceType: "user",
-      details: {
-        selfRegistration: true,
-        role: role,
-        organization: organization || "",
-      },
-      ipAddress: req.ip,
-      userAgent: req.get("User-Agent"),
-    });
-
-    res.status(201).json({
-      success: true,
-      message: "Employee created successfully",
-      data: {
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-        },
-        employee: {
-          employeeId: employee.basicInfo.employeeId,
-          designation: employee.basicInfo.designation,
-          department: employee.basicInfo.department,
-        },
-      },
-    });
-  } catch (error) {
-    console.error("Create employee error:", error);
-
-    // Cleanup if error occurs
-    if (req.body.email) {
-      await User.findOneAndDelete({ email: req.body.email });
-    }
-
-    res.status(500).json({
-      success: false,
-      message: "Error creating employee",
-      error: error.message,
-    });
-  }
-};
-
-// Get all employees for HR
-export const getAllEmployees = async (req, res) => {
-  try {
-    const {
-      page = 1,
-      limit = 10,
-      search = "",
-      department = "",
-      status = "",
-    } = req.query;
-
-    const query = {};
-
-    if (search) {
-      query["$or"] = [
-        { "basicInfo.fullName": { $regex: search, $options: "i" } },
-        { "basicInfo.employeeId": { $regex: search, $options: "i" } },
-        { "basicInfo.designation": { $regex: search, $options: "i" } },
-      ];
-    }
-
-    if (department) {
-      query["basicInfo.department"] = department;
-    }
-
-    if (status) {
-      query["basicInfo.employeeStatus"] = status;
-    }
-
-    const employees = await Employee.find(query)
-      .populate("user", "name email role isActive lastLogin")
-      .populate({ path: "basicInfo.reportingManager", select: "name email" })
-      .populate("createdBy", "name email")
-      .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
-
-    const total = await Employee.countDocuments(query);
-
-    res.json({
-      success: true,
-      data: employees,
-      pagination: {
-        current: parseInt(page),
-        pages: Math.ceil(total / limit),
-        total,
-      },
-    });
-  } catch (error) {
-    console.error("Get all employees error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
-  }
-};
-
-// Get single employee
-export const getEmployeeById = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const employee = await Employee.findById(id)
-      .populate("user", "name email role")
-      .populate({
-        path: "basicInfo.reportingManager",
-        select: "name email"
-      });
-
-    if (!employee) {
-      return res.status(404).json({
-        success: false,
-        message: "Employee not found"
-      });
-    }
-
-    res.json({
-      success: true,
-      data: employee
-    });
-
-  } catch (error) {
-    console.error("Get employee error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error"
-    });
-  }
-};
-
-
-
-import Employee from "../models/Employee.js";
-import EmployeePosting from "../models/EmployeePosting.js";
-import School from "../models/School.js";
-import asyncHandler from "express-async-handler";
-
-export const createEmployeePosting = asyncHandler(async (req, res) => {
-  let { 
-  employee,
-  school,
-  startDate,
-  endDate,
-  status,
-  remark,
-  monthlyBillingSalary,
-  tdsPercent,
-  gstPercent
-} = req.body;
-
-
-if (!monthlyBillingSalary) {
-  return res.status(400).json({
-    success:false,
-    message:"monthlyBillingSalary is required"
-  });
-}
-
-
-  // Check if employee exists
-  const employeeExists = await Employee.findById  (employee);
-  if (!employeeExists) {
-    return res.status(400).json({
-      success: false,
-      message: "Employee not found",
-    });
-  }
-
-  // Check if school exists and is active
-  const schoolExists = await School.findById(school);
-  if (!schoolExists) {
-    return res.status(400).json({
-      success: false,
-      message: "School not found",
-    });
-  }
-
-  if (schoolExists.status !== "active") {
-    return res.status(400).json({
-      success: false,
-      message: "Cannot post to inactive school",
-    });
-  }
-
-  // Agar school change ka case hai
-  if (status === "change_school") {
-    // Check karo ki employee kisi school mein currently posted hai
-    const currentPosting = await EmployeePosting.findOne({
-      employee: employee,
-      isActive: true,
-      status: { $in: ["continue", "change_school"] },
-    });
-
-    if (!currentPosting) {
-      return res.status(400).json({
-        success: false,
-        message: "Employee is not currently posted to any school",
-      });
-    }
-
-    // Agar employee already issi school mein hai
-    if (currentPosting.school.toString() === school) {
-      return res.status(400).json({
-        success: false,
-        message: "Employee is already posted to this school",
-      });
-    }
-  }
-
-  // Agar continue status hai to check karo ki pehle se active posting to nahi hai
-  if (status === "continue") {
-    const existingActivePosting = await EmployeePosting.findOne({
-      employee: employee,
-      isActive: true,
-      status: "continue",
-    });
-
-    if (existingActivePosting) {
-      // Agar same school mein hai to error
-      if (existingActivePosting.school.toString() === school) {
-        return res.status(400).json({
-          success: false,
-          message: "Employee already has active posting in this school",
-        });
-      } else {
-        // Different school mein hai to automatically status change_school karo
-        status = "change_school";
-        remark = remark || `Transferred from previous school`;
-      }
-    }
-  }
-
-  const posting = await EmployeePosting.create({
-    employee,
-    school,
-    startDate: startDate || new Date(),
-    endDate,
-    status: status || "continue",
-    remark,
-
-    monthlyBillingSalary,
-  tdsPercent: tdsPercent || 0,
-  gstPercent: gstPercent || 0,
-  
-    createdBy: req.user._id,
-    updatedBy: req.user._id,
-  });
-
-  const populatedPosting = await EmployeePosting.findById(posting._id)
-    .populate({
-      path: "employee",
-      select: "basicInfo.fullName basicInfo.employeeId basicInfo.designation",
-      populate: {
-        path: "user",
-        select: "name email",
-      },
-    })
-    .populate("school", "name city address")
-    .populate("createdBy", "name email")
-    .populate("updatedBy", "name email");
-
-  res.status(201).json({
-    success: true,
-    data: populatedPosting,
-    message: getStatusMessage(status),
-  });
-});
-
-
-// Helper function for status messages
-const getStatusMessage = (status) => {
-  const messages = {
-    continue: "Employee posted successfully",
-    resign: "Employee resignation recorded",
-    terminate: "Employee termination recorded",
-    change_school: "Employee transferred successfully",
-  };
-  return messages[status] || "Posting created successfully";
-};
-
-//  Get all employee postings
-export const getEmployeePostings = asyncHandler(async (req, res) => {
-  const { employee, school, status, isActive } = req.query;
-
-  let query = {};
-
-  if (employee) query.employee = employee;
-  if (school) query.school = school;
-  if (status) query.status = status;
-  if (isActive !== undefined) query.isActive = isActive === "true";
-  //query.isActive = "true"
-
-  const postings = await EmployeePosting.find(query)
-    .populate({
-      path: "employee",
-      select: "basicInfo.fullName basicInfo.employeeId basicInfo.designation",
-      populate: {
-        path: "user",
-        select: "name email",
-      },
-    })
-    .populate("school", "name city address")
-    .populate("createdBy", "name email")
-    .populate("updatedBy", "name email")
-    .sort({ startDate: -1 });
-
-  res.json({
-    success: true,
-    count: postings.length,
-    data: postings,
-  });
-});
-
-// Get employee posting by ID
-export const getEmployeePosting = asyncHandler(async (req, res) => {
-  if (!req.params?.id || req.params?.id === "undefined") {
-      return res.status(400).json({
-        success: false,
-        message: "Employee posting id is required",
-      });
-    }
-  const posting = await EmployeePosting.findById(req.params?.id)
-    .populate({
-      path: "employee",
-      select: "basicInfo.fullName basicInfo.employeeId basicInfo.designation",
-      populate: {
-        path: "user",
-        select: "name email role",
-      },
-    })
-    .populate("school", "name city address contactPersonName mobile email")
-    .populate("createdBy", "name email")
-    .populate("updatedBy", "name email");
-
-  if (!posting) {
-    return res.status(400).json({
-      success: false,
-      message: "Employee posting not found",
-    });
-  }
-
-  res.json({
-    success: true,
-    data: posting,
-  });
-});
-
-// Update employee posting
-export const updateEmployeePosting = asyncHandler(async (req, res) => {
-  if (!req.params?.id || req.params?.id === "undefined") {
-      return res.status(400).json({
-        success: false,
-        message: "Employee posting id is required",
-      });
-    }
-  const posting = await EmployeePosting.findById(req.params?.id);
-
-  if (!posting) {
-    return res.status(400).json({
-      success: false,
-      message: "Employee posting not found",
-    });
-  }
-
-  // Model ke pre-hook automatically handle karega
-  const { isActive, ...updateData } = req.body;
-
-  // Status change validation
-  const oldStatus = posting.status;
-  const newStatus = updateData.status;
-
-  if (oldStatus !== "continue" && newStatus === "continue" || (oldStatus !== "change_school" && newStatus === "change_school") && oldStatus !== "continue" && newStatus === "continue") {
-    return res.status(400).json({
-      success: false,
-      message: "Cannot continue posting. Please create new posting instead.",
-    });
-  }
-
-  if (newStatus) {
-    // Agar pehle resign/terminate tha aur ab continue karna chahte hain
-    if (
-      ["resign", "terminate"].includes(oldStatus) &&
-      newStatus === "continue"
-    ) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Cannot reactivate resigned/terminated posting. Create new posting instead.",
-      });
-    }
-
-    // Agar school change karna hai
-    if (newStatus === "change_school") {
-      // Check karo ki employee currently kisi school mein posted hai
-      const currentPosting = await EmployeePosting.findOne({
-        employee: posting.employee,
-        isActive: true,
-        status: { $in: ["continue", "change_school"] },
-        _id: { $ne: posting._id },
-      });
-
-      if (!currentPosting) {
-        return res.status(400).json({
-          success: false,
-          message: "Employee is not currently posted to any school",
-        });
-      }
-    }
-  }
-
-  // Model ke pre-hook automatically set karega
-  const updatedPosting = await EmployeePosting.findByIdAndUpdate(
-    req.params.id,
-    {
-      ...updateData,
-      updatedBy: req.user._id,
-    },
-    {
-      new: true,
-      runValidators: true,
-    },
-  )
-    .populate({
-      path: "employee",
-      select: "basicInfo.fullName basicInfo.employeeId basicInfo.designation",
-      populate: {
-        path: "user",
-        select: "name email",
-      },
-    })
-    .populate("school", "name city address")
-    .populate("createdBy", "name email")
-    .populate("updatedBy", "name email");
-
-  res.json({
-    success: true,
-    data: updatedPosting,
-    message: newStatus
-      ? `Status updated to ${newStatus}`
-      : "Posting updated successfully",
-  });
-});
-
-// Get employee posting history
-export const getEmployeePostingHistory = asyncHandler(async (req, res) => {
-  const { employeeId } = req.params;
-
-  const employee = await Employee.findById(employeeId);
-  if (!employee) {
-    return res.status(400).json({
-      success: false,
-      message: "Employee not found",
-    });
-  }
-
-  const postings = await EmployeePosting.find({ employee: employeeId })
-    .populate("school", "name city")
-    .sort({ startDate: -1 });
-
-  // Current school find karo (jo school ke currentTrainers array mein hai)
-  const schools = await School.find({ currentTrainers: employeeId });
-  const currentSchools = schools.map((school) => ({
-    _id: school._id,
-    name: school.name,
-    city: school.city,
-  }));
-
-  // Active posting find karo
-  const activePosting = await EmployeePosting.findOne({
-    employee: employeeId,
-    isActive: true,
-    status: { $in: ["continue", "change_school"] },
-  }).populate("school", "name city address");
-
-  res.json({
-    success: true,
-    data: {
-      employee: {
-        _id: employee._id,
-        name: employee.basicInfo.fullName,
-        employeeId: employee.basicInfo.employeeId,
-      },
-      history: postings,
-      current: activePosting,
-      currentSchools: currentSchools,
-    },
-  });
-});
-
-// Get employee's current posting status
-export const getEmployeeCurrentStatus = asyncHandler(async (req, res) => {
-  const { employeeId } = req.params;
-
-  if(!employeeId || employeeId === "undefined") {
-    return res.status(400).json({
-      success: false,
-      message: "Employee id is required",
-    });
-  }
-
-  // Active posting find karo
-  const activePosting = await EmployeePosting.findOne({
-    employee: employeeId,
-    isActive: true,
-  }).populate("school", "name city address");
-
-  // Current schools find karo
-  const schools = await School.find({ currentTrainers: employeeId }).select(
-    "name city trainersRequired",
-  );
-
-  res.json({
-    success: true,
-    data: {
-      posting: activePosting,
-      currentSchools: schools,
-      isCurrentlyPosted: schools.length > 0,
-    },
-  });
-});
-
-// Get posting analytics
-export const getPostingAnalytics = asyncHandler(async (req, res) => {
-  const statusAnalytics = await EmployeePosting.aggregate([
-    {
-      $group: {
-        _id: {
-          status: "$status",
-          isActive: "$isActive",
-        },
-        count: { $sum: 1 },
-      },
-    },
-    {
-      $group: {
-        _id: "$_id.status",
-        total: { $sum: "$count" },
-        active: {
-          $sum: {
-            $cond: [{ $eq: ["$_id.isActive", true] }, "$count", 0],
-          },
-        },
-        inactive: {
-          $sum: {
-            $cond: [{ $eq: ["$_id.isActive", false] }, "$count", 0],
-          },
-        },
-      },
-    },
-  ]);
-
-  const statusCounts = {};
-  for (const item of statusAnalytics) {
-    statusCounts[item._id] = {
-      total: item.total,
-      active: item.active,
-      inactive: item.inactive,
-    };
-  }
-
-  const schoolStats = await School.aggregate([
-    { $match: { status: "active" } },
-    {
-      $project: {
-        name: 1,
-        city: 1,
-        trainersRequired: 1,
-        currentCount: { $size: "$currentTrainers" },
-      },
-    },
-    {
-      $addFields: {
-        shortage: {
-          $max: [0, { $subtract: ["$trainersRequired", "$currentCount"] }],
-        },
-        status: {
-          $cond: {
-            if: { $gte: ["$currentCount", "$trainersRequired"] },
-            then: "adequate",
-            else: {
-              $cond: {
-                if: { $gt: ["$currentCount", 0] },
-                then: "shortage",
-                else: "critical",
-              },
-            },
-          },
-        },
-      },
-    },
-  ]);
-
-  res.json({
-    success: true,
-    data: {
-      statusCounts,
-      schoolStats,
-    },
-  });
-});
-
-export const getAllActiveEmployees = async (req, res) => {
-  try {
-    const employees = await Employee.find({ "basicInfo.employeeStatus": "Active" })
-      .select("basicInfo.fullName basicInfo.employeeId basicInfo.designation basicInfo.department basicInfo.employeeStatus",)
-      .populate("user", "name email role");
-
-    res.json({
-      success: true,
-      data: employees,
-    });
-  } catch (error) {
-    console.error("Get all employees error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
-  }
-};
-
-
-export const getActiveEmployeebyId = async (req, res) => {
-  try {
-    if (!req.params?.id || req.params?.id === "undefined") {
-      return res.status(400).json({
-        success: false,
-        message: "Employee id is required",
-      });
-    }
-    const employees = await Employee.find({ "basicInfo.employeeStatus": "Active", "_id": req.params?.id })
-      .select("basicInfo.fullName basicInfo.employeeId basicInfo.designation basicInfo.department basicInfo.employeeStatus basicInfo.dateOfJoining",)
-      .populate("user", "name email role");
-
-    res.json({
-      success: true,
-      data: employees,
-    });
-  } catch (error) {
-    console.error("Get all employees error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-    });
-  }
-};
-
-
-
 // controllers/invoiceController.js
 import mongoose from "mongoose";
 import asyncHandler from "express-async-handler";
@@ -803,184 +13,413 @@ import {
   uploadToCloudinary,
   deleteFromCloudinary,
 } from "../config/cloudinary.js";
+import { sendPaymentReceiptEmail } from "../utils/invoiceUtils.js";
+import { startOfMonth, endOfMonth, subMonths, getDaysInMonth, isWeekend, format, differenceInDays } from "date-fns";
 
 // @desc    Auto-generate invoices for previous month
 // @route   POST /api/invoices/auto-generate
-// @access  Private/Admin (Called by cron job)
+// @access  Private/Admin (Called by cron job on 1st of every month)
 export const autoGenerateInvoices = asyncHandler(async (req, res) => {
-  const today = new Date();
-  today.setDate(1);
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  
-  // Get previous month
-  let month = today.getMonth(); // 0-11
-  let year = today.getFullYear();
+  try {
+    const { manualMonth, manualYear } = req.body || {};
+    let targetMonth, targetYear;
+    
+    const currentDate = new Date();
+    const today = currentDate.getDate();
+    const currentMonth = currentDate.getMonth() + 1; // 1-12
+    const currentYear = currentDate.getFullYear();
 
-  // If today is 1st of month, generate for previous month
-  if (today.getDate() === 1) {
-    month = month === 0 ? 11 : month - 1;
-    year = month === 11 ? year - 1 : year;
-  } else {
-    return res.status(400).json({
-      success: false,
-      message: "Invoices can only be generated on 1st of month",
-    });
-  }
-
-  // Check if already generated for this month
-  const existingInvoices = await Invoice.findOne({
-    month: month + 1, // Convert to 1-12
-    year: year,
-  });
-
-  if (existingInvoices) {
-    return res.status(400).json({
-      success: false,
-      message: "Invoices already generated for this month",
-    });
-  }
-
-  // Get all active schools
-  const schools = await School.find({ status: "active" });
-  const generatedInvoices = [];
-
-  for (const school of schools) {
-    // Get all active postings for this school in previous month
-    const startDate = new Date(year, month, 1);
-    const endDate = new Date(year, month + 1, 0);
-
-    const postings = await EmployeePosting.find({
-      school: school._id,
-      isActive: true,
-      $or: [
-        { startDate: { $lte: endDate } },
-        { endDate: { $gte: startDate, $lte: endDate } },
-      ],
-    }).populate({
-      path: "employee",
-      select: "basicInfo.fullName basicInfo.employeeId user",
-      populate: {
-        path: "user",
-        select: "name",
-      },
-    });
-
-    if (postings.length === 0) continue;
-
-    // Get holidays for the month
-    const holidays = await Holiday.find({
-      date: { $gte: startDate, $lte: endDate },
-    });
-
-    const holidayDates = holidays.map(
-      (h) => h.date.toISOString().split("T")[0],
-    );
-
-    // Calculate invoice items
-    const items = [];
-    let subtotal = 0;
-
-    for (const posting of postings) {
-      // Get leaves for this employee in the month
-      const leaves = await Leave.find({
-        employee: posting.employee._id,
-        fromDate: { $lte: endDate },
-        toDate: { $gte: startDate },
-        status: "Approved",
-      });
-
-      // Calculate working days and leave days
-      const daysInMonth = endDate.getDate();
-      let leaveDays = 0;
-
-      leaves.forEach((leave) => {
-        const leaveStart = new Date(Math.max(leave.fromDate, startDate));
-        const leaveEnd = new Date(Math.min(leave.toDate, endDate));
-
-        for (
-          let d = new Date(leaveStart);
-          d <= leaveEnd;
-          d.setDate(d.getDate() + 1)
-        ) {
-          const dateStr = d.toISOString().split("T")[0];
-          // Skip holidays
-          if (!holidayDates.includes(dateStr)) {
-            leaveDays++;
-          }
-        }
-      });
-
-      // Calculate prorated amount
-      const workingDays = daysInMonth - holidayDates.length;
-      const actualWorkingDays = workingDays - leaveDays;
-      const dailyRate = posting.monthlyBillingSalary / daysInMonth;
-      const proratedAmount = dailyRate * actualWorkingDays;
-
-      const item = {
-        employee: posting.employee._id,
-        employeeName: posting.employee.basicInfo.fullName,
-        employeeId: posting.employee.basicInfo.employeeId,
-        monthlyBillingSalary: posting.monthlyBillingSalary,
-        leaveDays: leaveDays,
-        leaveDeduction: dailyRate * leaveDays,
-        workingDays: workingDays,
-        actualWorkingDays: actualWorkingDays,
-        proratedAmount: Math.round(proratedAmount),
-        tdsPercent: posting.tdsPercent || 0,
-        tdsAmount: (proratedAmount * (posting.tdsPercent || 0)) / 100,
-        gstPercent: posting.gstPercent || 0,
-        gstAmount: (proratedAmount * (posting.gstPercent || 0)) / 100,
-        subtotal: Math.round(proratedAmount),
-      };
-
-      items.push(item);
-      subtotal += Math.round(proratedAmount);
+    // ==================== VALIDATION ====================
+    
+    // CASE 1: Manual generation (Admin forcing generation for specific month)
+    if (manualMonth && manualYear) {
+      // Manual mode can only generate previous month's invoice
+      const prevMonth = currentMonth === 1 ? 12 : currentMonth - 1;
+      const prevYear = currentMonth === 1 ? currentYear - 1 : currentYear;
+      
+      if (manualMonth !== prevMonth || manualYear !== prevYear) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(400).json({
+          success: false,
+          message: `You can only generate invoice for previous month: ${prevMonth}/${prevYear}`,
+        });
+      }
+      
+      targetMonth = manualMonth;
+      targetYear = manualYear;
+    }
+    
+    // CASE 2: Auto generation (Cron job - should only run on 1st)
+    else {
+      // Auto mode should only run on 1st of month
+      if (today !== 1) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(400).json({
+          success: false,
+          message: "Auto-generation only runs on 1st of month. Use manual mode for other dates.",
+        });
+      }
+      
+      // Calculate previous month using date-fns (safer)
+      const previousMonthDate = subMonths(currentDate, 1);
+      targetMonth = previousMonthDate.getMonth() + 1; // 1-12
+      targetYear = previousMonthDate.getFullYear();
     }
 
-    // Create invoice
-    const invoice = await Invoice.create({
-      school: school._id,
-      schoolDetails: {
-        name: school.name,
-        city: school.city,
-        address: school.address,
-        contactPersonName: school.contactPersonName,
-        mobile: school.mobile,
-        email: school.email,
+    console.log(`🚀 Generating invoices for: Month ${targetMonth}, Year ${targetYear}`);
+
+    // ==================== GET ACTIVE SCHOOLS ====================
+    
+    const schools = await School.find({ 
+      status: "active",
+      // Optional: Only schools with active trainers
+      // currentTrainers: { $exists: true, $ne: [] }
+    }).session(session);
+
+    if (!schools.length) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(200).json({
+        success: true,
+        message: "No active schools found for invoice generation",
+        data: [],
+      });
+    }
+
+    // ==================== DATE RANGE FOR TARGET MONTH ====================
+    
+    const startDate = startOfMonth(new Date(targetYear, targetMonth - 1, 1));
+    const endDate = endOfMonth(startDate);
+    const daysInMonth = getDaysInMonth(startDate);
+    
+    console.log(`📅 Date range: ${format(startDate, 'yyyy-MM-dd')} to ${format(endDate, 'yyyy-MM-dd')} (${daysInMonth} days)`);
+
+    // ==================== GET ALL HOLIDAYS FOR THE MONTH ====================
+    
+    const holidays = await Holiday.find({
+      date: { 
+        $gte: startDate, 
+        $lte: endDate 
       },
-      month: month + 1,
-      year: year,
-      items: items,
-      subtotal: subtotal,
-      tdsPercent: 0, // Default, can be customized later
-      gstPercent: 0, // Default, can be customized later
-      grandTotal: subtotal,
-      status: "Generated",
-      generatedBy: req.user?._id,
-      generatedAt: new Date(),
-    });
+    }).session(session);
 
-    // Update school ledger
-    await SchoolLedger.create({
-      school: school._id,
-      invoice: invoice._id,
-      transactionType: "Invoice Generated",
-      amount: subtotal,
-      balance: subtotal,
-      month: month + 1,
-      year: year,
-      description: `Invoice for ${month + 1}/${year}`,
-      createdBy: req.user?._id,
-    });
+    const holidaySet = new Set(
+      holidays.map(h => format(h.date, 'yyyy-MM-dd'))
+    );
+    
+    console.log(`🎉 Total holidays: ${holidaySet.size}`);
 
-    generatedInvoices.push(invoice);
+    // ==================== PROCESS EACH SCHOOL ====================
+    
+    const generatedInvoices = [];
+    const skippedSchools = [];
+    const failedSchools = [];
+
+    for (const school of schools) {
+      try {
+        // Check if invoice already exists for this school/month/year
+        const existingInvoice = await Invoice.findOne({
+          school: school._id,
+          month: targetMonth,
+          year: targetYear,
+          status: { $ne: "Cancelled" } // Don't regenerate if cancelled
+        }).session(session);
+
+        if (existingInvoice) {
+          console.log(`⏭️ Invoice already exists for ${school.name}`);
+          skippedSchools.push({
+            school: school.name,
+            reason: "Invoice already exists"
+          });
+          continue;
+        }
+
+        // ==================== GET ACTIVE EMPLOYEE POSTINGS ====================
+        
+        const postings = await EmployeePosting.find({
+          school: school._id,
+          isActive: true,
+          monthlyBillingSalary: { $gt: 0 }, // Only those with valid billing rate
+          $or: [
+            { 
+              startDate: { $lte: endDate },
+              $or: [
+                { endDate: null },
+                { endDate: { $gte: startDate } }
+              ]
+            }
+          ]
+        })
+        .populate({
+          path: "employee",
+          select: "basicInfo.fullName basicInfo.employeeId basicInfo.designation",
+        })
+        .session(session);
+
+        if (!postings.length) {
+          console.log(`⏭️ No active employees for ${school.name}`);
+          skippedSchools.push({
+            school: school.name,
+            reason: "No active employees"
+          });
+          continue;
+        }
+
+        console.log(`👥 Processing ${school.name} - ${postings.length} employees`);
+
+        // ==================== PROCESS EACH EMPLOYEE ====================
+        
+        const items = [];
+        let subtotal = 0;
+        let totalTds = 0;
+        let totalGst = 0;
+
+        for (const posting of postings) {
+          if (!posting.employee) {
+            console.warn(`⚠️ Posting ${posting._id} has no employee reference`);
+            continue;
+          }
+
+          // Calculate billable days for this employee in the month
+          const billableStart = new Date(Math.max(
+            posting.startDate.getTime(),
+            startDate.getTime()
+          ));
+          
+          const billableEnd = posting.endDate 
+            ? new Date(Math.min(posting.endDate.getTime(), endDate.getTime()))
+            : endDate;
+
+          // If no overlap with month, skip
+          if (billableStart > billableEnd) {
+            continue;
+          }
+
+          // Calculate total billable days (including weekends)
+          const totalBillableDays = differenceInDays(billableEnd, billableStart) + 1;
+          
+          if (totalBillableDays <= 0) continue;
+
+          // ==================== GET APPROVED LEAVES ====================
+          
+          const leaves = await Leave.find({
+            employee: posting.employee._id,
+            status: "Approved",
+            $or: [
+              {
+                fromDate: { $lte: endDate },
+                toDate: { $gte: startDate }
+              }
+            ]
+          }).session(session);
+
+          // Calculate leave days (excluding holidays)
+          const leaveDaysSet = new Set();
+          
+          for (const leave of leaves) {
+            const leaveStart = new Date(Math.max(leave.fromDate, billableStart));
+            const leaveEnd = new Date(Math.min(leave.toDate, billableEnd));
+            
+            // Iterate through each day of leave
+            for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
+              const dateStr = format(d, 'yyyy-MM-dd');
+              
+              // Don't count as leave if it's a holiday
+              if (!holidaySet.has(dateStr)) {
+                leaveDaysSet.add(dateStr);
+              }
+            }
+          }
+
+          const leaveDays = leaveDaysSet.size;
+          
+          // Calculate working days (billable days - leaves)
+          // Note: Weekends are already included in billable days
+          const actualWorkingDays = Math.max(0, totalBillableDays - leaveDays);
+          
+          // Calculate prorated amount
+          const dailyRate = posting.monthlyBillingSalary / daysInMonth;
+          const proratedAmount = Math.round(dailyRate * actualWorkingDays);
+
+          // Calculate TDS and GST (school level rates)
+          const tdsAmount = Math.round((proratedAmount * (school.tdsPercent || 0)) / 100);
+          const gstAmount = Math.round((proratedAmount * (school.gstPercent || 0)) / 100);
+
+          // Create item
+          const item = {
+            employee: posting.employee._id,
+            employeeName: posting.employee.basicInfo?.fullName || "Unknown",
+            employeeId: posting.employee.basicInfo?.employeeId || "N/A",
+            monthlyBillingSalary: posting.monthlyBillingSalary,
+            leaveDays,
+            leaveDeduction: Math.round(dailyRate * leaveDays),
+            workingDays: totalBillableDays,
+            actualWorkingDays,
+            proratedAmount,
+            tdsPercent: school.tdsPercent || 0,
+            tdsAmount,
+            gstPercent: school.gstPercent || 0,
+            gstAmount,
+            subtotal: proratedAmount,
+          };
+
+          items.push(item);
+          
+          subtotal += proratedAmount;
+          totalTds += tdsAmount;
+          totalGst += gstAmount;
+        }
+
+        // If no valid items after processing, skip
+        if (!items.length) {
+          console.log(`⏭️ No valid invoice items for ${school.name}`);
+          skippedSchools.push({
+            school: school.name,
+            reason: "No valid invoice items"
+          });
+          continue;
+        }
+
+        // ==================== CHECK FOR PREVIOUS DUE ====================
+        
+        const previousDueInvoice = await Invoice.findOne({
+          school: school._id,
+          paymentStatus: { $in: ["Unpaid", "Partial"] },
+          grandTotal: { $gt: 0 }
+        })
+        .sort({ createdAt: -1 })
+        .session(session);
+
+        let previousDue = 0;
+        if (previousDueInvoice) {
+          previousDue = Math.max(
+            0,
+            previousDueInvoice.grandTotal - (previousDueInvoice.paidAmount || 0)
+          );
+        }
+
+        // ==================== CALCULATE GRAND TOTAL ====================
+        
+        const grandTotal = subtotal - totalTds + totalGst + previousDue;
+
+        // ==================== CREATE INVOICE ====================
+        
+        const invoiceData = {
+          school: school._id,
+          schoolDetails: {
+            name: school.name,
+            city: school.city,
+            address: school.address,
+            contactPersonName: school.contactPersonName,
+            mobile: school.mobile,
+            email: school.email,
+          },
+          month: targetMonth,
+          year: targetYear,
+          items,
+          subtotal,
+          previousDue, // Add this to schema if not exists
+          tdsPercent: school.tdsPercent || 0,
+          tdsAmount: totalTds,
+          gstPercent: school.gstPercent || 0,
+          gstAmount: totalGst,
+          grandTotal,
+          status: "Generated",
+          paymentStatus: previousDue > 0 ? "Partial" : "Unpaid",
+          generatedBy: req.user?._id || null,
+          generatedAt: new Date(),
+          createdBy: req.user?._id || null,
+        };
+
+        const invoice = await Invoice.create([invoiceData], { session });
+
+        // ==================== UPDATE LEDGER ====================
+        
+        await SchoolLedger.create([{
+          school: school._id,
+          invoice: invoice[0]._id,
+          transactionType: "Invoice Generated",
+          amount: grandTotal,
+          balance: grandTotal,
+          month: targetMonth,
+          year: targetYear,
+          description: `Invoice generated for ${targetMonth}/${targetYear}`,
+          createdBy: req.user?._id || null,
+          date: new Date(),
+        }], { session });
+
+        generatedInvoices.push(invoice[0]);
+        console.log(`✅ Invoice generated for ${school.name}: ${invoice[0].invoiceNumber} - ₹${grandTotal}`);
+
+      } catch (schoolError) {
+        console.error(`❌ Error processing school ${school.name}:`, schoolError);
+        failedSchools.push({
+          school: school.name,
+          error: schoolError.message
+        });
+        // Continue with next school, don't break the loop
+      }
+    }
+
+    // ==================== COMMIT TRANSACTION ====================
+    
+    await session.commitTransaction();
+    session.endSession();
+
+    // ==================== SEND RESPONSE ====================
+    
+    const response = {
+      success: true,
+      message: `Invoice generation completed`,
+      data: {
+        generated: generatedInvoices.map(inv => ({
+          id: inv._id,
+          invoiceNumber: inv.invoiceNumber,
+          school: inv.schoolDetails.name,
+          amount: inv.grandTotal,
+          month: inv.month,
+          year: inv.year,
+        })),
+        summary: {
+          total: generatedInvoices.length,
+          skipped: skippedSchools.length,
+          failed: failedSchools.length,
+        },
+        skipped: skippedSchools,
+        failed: failedSchools,
+      },
+    };
+
+    // Log summary
+    console.log("\n========== INVOICE GENERATION SUMMARY ==========");
+    console.log(`✅ Generated: ${generatedInvoices.length} invoices`);
+    console.log(`⏭️ Skipped: ${skippedSchools.length} schools`);
+    console.log(`❌ Failed: ${failedSchools.length} schools`);
+    console.log(`💰 Total Amount: ₹${generatedInvoices.reduce((sum, inv) => sum + inv.grandTotal, 0)}`);
+    console.log("================================================\n");
+
+    res.status(201).json(response);
+
+  } catch (error) {
+    // ==================== ROLLBACK ON ERROR ====================
+    
+    await session.abortTransaction();
+    session.endSession();
+    
+    console.error("❌ Invoice generation failed:", error);
+    
+    res.status(500).json({
+      success: false,
+      message: "Invoice generation failed",
+      error: error.message,
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
   }
-
-  res.status(201).json({
-    success: true,
-    message: `Generated ${generatedInvoices.length} invoices`,
-    data: generatedInvoices,
-  });
 });
 
 // @desc    Get all invoices with filters
@@ -1152,20 +591,18 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
 
         // Recalculate for this item
         const dailyRate =
-          originalItem.monthlyBillingSalary / invoice.daysInMonth;
+          originalItem.monthlyBillingSalary / originalItem.workingDays;
+
         const leaveDeduction = dailyRate * modifiedItem.leaveDays;
         const actualWorkingDays =
           originalItem.workingDays - modifiedItem.leaveDays;
         const proratedAmount = dailyRate * actualWorkingDays;
 
-        invoice.items[index] = {
-          ...originalItem,
-          leaveDays: modifiedItem.leaveDays,
-          leaveDeduction: leaveDeduction,
-          actualWorkingDays: actualWorkingDays,
-          proratedAmount: Math.round(proratedAmount),
-          subtotal: Math.round(proratedAmount),
-        };
+        invoice.items[index].leaveDays = modifiedItem.leaveDays;
+        invoice.items[index].leaveDeduction = leaveDeduction;
+        invoice.items[index].actualWorkingDays = actualWorkingDays;
+        invoice.items[index].proratedAmount = Math.round(proratedAmount);
+        invoice.items[index].subtotal = Math.round(proratedAmount);
       }
     });
 
@@ -1359,7 +796,7 @@ export const recordPayment = asyncHandler(async (req, res) => {
   }
 
   // Calculate new paid amount
-  const newPaidAmount = invoice.paidAmount + amount;
+  const newPaidAmount = (invoice.paidAmount || 0) + amount;
 
   if (newPaidAmount > invoice.grandTotal) {
     return res.status(400).json({
@@ -1368,8 +805,14 @@ export const recordPayment = asyncHandler(async (req, res) => {
     });
   }
 
-  // Create payment record
+  // Generate payment number
+  const paymentCount = await Payment.countDocuments();
+
+  const paymentNumber = `PAY-${new Date().getFullYear()}-${String(paymentCount + 1).padStart(4, "0")}`;
+
   const payment = await Payment.create({
+    paymentNumber,
+
     school: invoice.school,
     invoices: [invoice._id],
     amount: amount,
@@ -1407,6 +850,8 @@ export const recordPayment = asyncHandler(async (req, res) => {
     reference: referenceNumber,
     createdBy: req.user._id,
   });
+
+  await sendPaymentReceiptEmail(invoice.schoolDetails.email, invoice, payment);
 
   res.json({
     success: true,
@@ -1493,360 +938,384 @@ export const cancelInvoice = asyncHandler(async (req, res) => {
   });
 });
 
-import asyncHandler from "express-async-handler";
-import School from "../models/School.js";
+
+// services/invoiceService.js
+import api from './api'; // Aapka existing API service
+
+const invoiceService = {
+  // Get all invoices with filters
+  getInvoices: (params) => api.get('/invoices', { params }),
+  
+  // Get single invoice
+  getInvoice: (id) => api.get(`/invoices/${id}`),
+  
+  // Get invoice stats
+  getStats: (params) => api.get('/invoices/stats', { params }),
+  
+  // Auto-generate invoices
+  autoGenerate: (data) => api.post('/invoices/auto-generate',data),
+  
+  // Verify invoice
+  verifyInvoice: (id, data) => api.put(`/invoices/${id}/verify`, data),
+  
+  // Bulk send invoices
+  sendBulk: (invoiceIds) => api.post('/invoices/send-bulk', { invoiceIds }),
+  
+  // Record payment
+  recordPayment: (id, data) => api.post(`/invoices/${id}/payment`, data),
+  
+  // Download invoice PDF
+  downloadInvoice: (id) => api.get(`/invoices/${id}/download`, {
+    responseType: 'blob'
+  }),
+  
+  // Cancel invoice
+  cancelInvoice: (id, reason) => api.delete(`/invoices/${id}`, { data: { reason } })
+};
+
+export default invoiceService;
+
+
+// routes/invoiceRoutes.js
+import express from 'express';
 import {
-  uploadToCloudinary,
-  deleteFromCloudinary,
-} from "../config/cloudinary.js";
+  autoGenerateInvoices,
+  getInvoices,
+  getInvoice,
+  verifyInvoice,
+  sendInvoicesBulk,
+  getInvoiceStats,
+  recordPayment,
+  downloadInvoice,
+  cancelInvoice
+} from '../controllers/invoiceController.js';
+import { authenticate } from '../middleware/auth.js';
+import { requireAdminOrHR } from '../middleware/profileCompletion.js';
 
+const router = express.Router();
 
+// All routes require authentication and admin access
+router.use(authenticate);
+router.use(requireAdminOrHR);
+// Auto-generate invoices (called by cron job)
+router.post('/auto-generate', autoGenerateInvoices);
 
-// Create new school
-export const createSchool = asyncHandler(async (req, res) => {
-  const {
-    name,
-    city,
-    address,
-    contactPersonName,
-    mobile,
-    email,
-    trainersRequired,
-  } = req.body;
+// Dashboard stats
+router.get('/stats', getInvoiceStats);
 
-  // Check if school already exists
-  const schoolExists = await School.findOne({ email });
-  if (schoolExists) {
-    res.status(400);
-    throw new Error("School with this email already exists");
-  }
+// Bulk send
+router.post('/send-bulk', sendInvoicesBulk);
 
-  let logoData = null;
+// Invoice CRUD
+router.route('/')
+  .get(getInvoices);
 
-  // Upload logo if provided
-  if (req.body.logoBase64) {
-    try {
-      logoData = await uploadToCloudinary(req.body.logoBase64);
-    } catch (error) {
-      res.status(400);
-      throw new Error("Logo upload failed");
-    }
-  }
+router.route('/:id')
+  .get(getInvoice)
+  .delete(cancelInvoice);
 
-  const school = await School.create({
-    name,
-    city,
-    address,
-    contactPersonName,
-    mobile,
-    email,
-    trainersRequired: trainersRequired || 1,
-    logo: logoData,
-    createdBy: req.user._id,
-    updatedBy: req.user._id,
-  });
+// Verify invoice
+router.put('/:id/verify', verifyInvoice);
 
-  const populatedSchool = await School.findById(school._id)
-    .populate("currentTrainers", "basicInfo.fullName basicInfo.employeeId")
-    .populate("createdBy", "name email")
-    .populate("updatedBy", "name email");
+// Download PDF
+router.get('/:id/download', downloadInvoice);
 
-  res.status(201).json({
-    success: true,
-    data: populatedSchool,
-  });
-});
+// Record payment
+router.post('/:id/payment', recordPayment);
 
-// Get all schools
-export const getSchools = asyncHandler(async (req, res) => {
-  const { status, city, search } = req.query;
+export default router;
 
-  let query = {};
+import mongoose from "mongoose";
 
-  if (status) query.status = status;
-  if (city) query.city = new RegExp(city, "i");
-  if (search) {
-    query.$or = [
-      { name: new RegExp(search, "i") },
-      { email: new RegExp(search, "i") },
-      { contactPersonName: new RegExp(search, "i") },
-    ];
-  }
-
-  const schools = await School.find(query)
-    .populate("currentTrainers", "basicInfo.fullName basicInfo.employeeId")
-    .populate("createdBy", "name email")
-    .populate("updatedBy", "name email")
-    .sort({ createdAt: -1 });
-
-  // Add virtuals to response
-  const schoolsWithVirtuals = schools.map((school) => ({
-    ...school.toObject(),
-    trainersCount: school.currentTrainers.length,
-    trainerStatus: school.trainerStatus,
-    trainerRequirementStatus: {
-      required: school.trainersRequired,
-      current: school.currentTrainers.length,
-      needed: Math.max(
-        0,
-        school.trainersRequired - school.currentTrainers.length,
-      ),
+const schoolSchema = new mongoose.Schema(
+  {
+    name: {
+      type: String,
+      required: [true, "School name is required"],
+      trim: true,
     },
-  }));
-
-  res.json({
-    success: true,
-    count: schools.length,
-    data: schoolsWithVirtuals,
-  });
-});
-
-// Get single school
-export const getSchool = asyncHandler(async (req, res) => {
-  const { id } = req.params
-  if (!id || id === "undefined") {
-    return res.status(400).json({
-      success: false,
-      message: "Id not found",
-    });
-  }
-  const school = await School.findById(req.params?.id)
-    .populate({
-      path: "currentTrainers",
-      select: "basicInfo.fullName basicInfo.employeeId basicInfo.designation",
-      populate: {
-        path: "user",
-        select: "name email",
+    city: {
+      type: String,
+      required: [true, "City is required"],
+      trim: true,
+    },
+    address: {
+      type: String,
+      required: [true, "Address is required"],
+      trim: true,
+    },
+    contactPersonName: {
+      type: String,
+      required: [true, "Contact person name is required"],
+      trim: true,
+    },
+    mobile: {
+      type: String,
+      required: [true, "Mobile number is required"],
+      validate: {
+        validator: function (v) {
+          return /^\d{10}$/.test(v);
+        },
+        message: "Mobile number must be 10 digits",
       },
-    })
-    .populate("createdBy", "name email")
-    .populate("updatedBy", "name email");
-
-  if (!school) {
-    return res.status(400).json({
-      success: false,
-      message: "School not found",
-    });
-  }
-
-  const schoolData = {
-    ...school.toObject(),
-    trainersCount: school.currentTrainers.length,
-    trainerStatus: school.trainerStatus,
-    trainerRequirementStatus: {
-      required: school.trainersRequired,
-      current: school.currentTrainers.length,
-      needed: Math.max(
-        0,
-        school.trainersRequired - school.currentTrainers.length,
-      ),
     },
-  };
+    email: {
+      type: String,
+      required: [true, "Email is required"],
+      lowercase: true,
+      trim: true,
+      match: [
+        /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/,
+        "Please provide a valid email",
+      ],
+    },
+    tdsPercent: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100,
+    },
+    gstPercent: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 100,
+    },
 
-  res.json({
-    success: true,
-    data: schoolData,
-  });
+    status: {
+      type: String,
+      enum: ["active", "inactive"],
+      default: "active",
+    },
+    trainersRequired: {
+      type: Number,
+      required: [true, "Number of trainers required is needed"],
+      min: [1, "At least 1 trainer is required"],
+      default: 1,
+    },
+    currentTrainers: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+    ],
+    logo: {
+      url: String,
+      public_id: String,
+    },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+  },
+  {
+    timestamps: true,
+  },
+);
+
+// Virtual for current trainers count
+schoolSchema.virtual("trainersCount").get(function () {
+  return this.currentTrainers.length;
 });
 
-// Update school
-export const updateSchool = asyncHandler(async (req, res) => {
-  const school = await School.findById(req.params.id);
+// Virtual for trainer status
+schoolSchema.virtual("trainerStatus").get(function () {
+  const count = this.currentTrainers.length;
+  const required = this.trainersRequired;
 
-  if (!school) {
-    return res.status(400).json({
-      success: false,
-      message: "School not found",
-    });
+  if (count >= required) return "adequate";
+  if (count > 0 && count < required) return "shortage";
+  return "critical";
+});
+
+// Indexes
+schoolSchema.index({ city: 1 });
+schoolSchema.index({ status: 1 });
+schoolSchema.index({ currentTrainers: 1 });
+
+const School = mongoose.model("School", schoolSchema);
+export default School;
+
+
+
+import mongoose from "mongoose";
+
+const employeePostingSchema = new mongoose.Schema(
+  {
+    employee: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+      required: true,
+    },
+    school: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "School",
+      required: true,
+    },
+    // Add these fields to EmployeePosting model
+    monthlyBillingSalary: {
+      type: Number,
+      required: [true, "Billing rate is required"],
+      min: [0, "Billing rate cannot be negative"],
+    },
+    startDate: {
+      type: Date,
+      default: Date.now,
+      required: true,
+    },
+    endDate: {
+      type: Date,
+    },
+    status: {
+      type: String,
+      enum: ["continue", "resign", "terminate", "change_school"],
+      default: "continue",
+      required: true,
+    },
+    remark: String,
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
+    updatedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
+  },
+  {
+    timestamps: true,
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
+  },
+);
+
+// ✅ Virtual for total billing
+employeePostingSchema.virtual("totalBilling").get(function () {
+  if (!this.endDate) return null;
+  const days = Math.ceil(
+    (this.endDate - this.startDate) / (1000 * 60 * 60 * 24),
+  );
+  const months = days / 30;
+  return this.monthlyBillingSalary * months;
+});
+
+// ✅ Pre-save validation
+employeePostingSchema.pre("save", function (next) {
+  if (this.isActive && !this.monthlyBillingSalary) {
+    next(new Error("Billing rate is required for active postings"));
   }
+  if (this.isActive && this.monthlyBillingSalary <= 0) {
+    next(new Error("Billing rate must be greater than 0"));
+  }
+  next();
+});
 
-  const { status } = req.body;
+/* =====================================================
+   🛡 LOOP PROTECTION
+===================================================== */
+employeePostingSchema.pre("save", function (next) {
+  if (this._skipHook) return next();
+  next();
+});
 
-  if (school.status === "active" && status === "inactive") {
-    // Check if school has active trainers
-    if (school.currentTrainers.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Cannot deactivate school with active trainers. Reassign trainers first.",
+/* =====================================================
+   POST SAVE
+===================================================== */
+employeePostingSchema.post("save", async function (doc) {
+  if (doc._skipHook) return;
+  await handleTrainerUpdate(doc);
+});
+
+/* =====================================================
+   POST FINDONEANDUPDATE
+===================================================== */
+employeePostingSchema.post("findOneAndUpdate", async function () {
+  const doc = await this.model.findOne(this.getQuery());
+  if (!doc || doc._skipHook) return;
+  await handleTrainerUpdate(doc);
+});
+
+/* =====================================================
+   🔥 MAIN LOGIC WITH BILLING RATE VALIDATION
+===================================================== */
+async function handleTrainerUpdate(posting) {
+  const School = mongoose.model("School");
+  const EmployeePosting = mongoose.model("EmployeePosting");
+
+  const employeeId = posting.employee;
+  const schoolId = posting.school;
+
+  /* ---------------- RESIGN / TERMINATE ---------------- */
+  if (posting.status === "resign" || posting.status === "terminate") {
+    await School.findByIdAndUpdate(schoolId, {
+      $pull: { currentTrainers: employeeId },
+    });
+
+    posting.isActive = false;
+    posting.endDate = new Date();
+    posting._skipHook = true;
+    await posting.save({ validateBeforeSave: false });
+  } else if (
+
+  /* ---------------- CHANGE SCHOOL / CONTINUE ---------------- */
+    posting.status === "change_school" ||
+    posting.status === "continue"
+  ) {
+    //  Validate billing rate before activation
+    if (!posting.monthlyBillingSalary || posting.monthlyBillingSalary <= 0) {
+      console.error(`Invalid billing rate for posting ${posting._id}`);
+      // Aap yahan error throw kar sakte ho ya default set kar sakte ho
+      // throw new Error('Cannot activate posting without valid billing rate');
+    }
+
+    const otherPostings = await EmployeePosting.find({
+      employee: employeeId,
+      isActive: true,
+      _id: { $ne: posting._id },
+    });
+
+    for (const old of otherPostings) {
+      await School.findByIdAndUpdate(old.school, {
+        $pull: { currentTrainers: employeeId },
       });
-    }
-  }
 
-  let logoData = school.logo;
-
-  // If new logo provided
-  if (req.body.logoBase64) {
-    // Delete old logo if exists
-    if (school.logo && school.logo.public_id) {
-      await deleteFromCloudinary(school.logo.public_id);
+      old.isActive = false;
+      old.endDate = new Date();
+      old._skipHook = true;
+      await old.save({ validateBeforeSave: false });
     }
 
-    // Upload new logo
-    try {
-      logoData = await uploadToCloudinary(req.body.logoBase64);
-    } catch (error) {
-      return res.status(400).json({
-        success: false,
-        message: "Logo upload failed",
-      });
-    }
-  }
-
-  // Update school
-  const updatedSchool = await School.findByIdAndUpdate(
-    req.params.id,
-    {
-      ...req.body,
-      logo: logoData,
-      updatedBy: req.user._id,
-    },
-    { new: true, runValidators: true },
-  )
-    .populate("currentTrainers", "basicInfo.fullName basicInfo.employeeId")
-    .populate("createdBy", "name email")
-    .populate("updatedBy", "name email");
-
-  res.json({
-    success: true,
-    data: updatedSchool,
-  });
-});
-
-// Delete school
-export const deleteSchool = asyncHandler(async (req, res) => {
-  const school = await School.findById(req.params.id);
-
-  if (!school) {
-    return res.status(400).json({
-      success: false,
-      message: "School not found",
+    await School.findByIdAndUpdate(schoolId, {
+      $addToSet: { currentTrainers: employeeId },
     });
+
+    posting.isActive = true;
+    posting._skipHook = true;
+    await posting.save({ validateBeforeSave: false });
   }
+}
 
-  // Check if school has active trainers
-  if (school.currentTrainers.length > 0) {
-    return res.status(400).json({
-      success: false,
-      message: "Cannot delete school with active trainers. Reassign trainers first.",
-    });
-  }
+/* =====================================================
+   INDEXES - UPDATED
+===================================================== */
+employeePostingSchema.index({ employee: 1, isActive: 1 });
+employeePostingSchema.index({ school: 1, isActive: 1 });
+employeePostingSchema.index({ status: 1 });
+employeePostingSchema.index({ monthlyBillingSalary: 1 });
+employeePostingSchema.index({ school: 1, isActive: 1, monthlyBillingSalary: 1 });
 
-  // Delete logo from cloudinary
-  if (school.logo && school.logo.public_id) {
-    await deleteFromCloudinary(school.logo.public_id);
-  }
 
-  await school.deleteOne();
-
-  res.json({
-    success: true,
-    message: "School deleted successfully",
-  });
-});
-
-// Get school dashboard stats
-export const getSchoolStats = asyncHandler(async (req, res) => {
-  const totalSchools = await School.countDocuments();
-  const activeSchools = await School.countDocuments({ status: "active" });
-  const inactiveSchools = await School.countDocuments({ status: "inactive" });
-
-  const schools = await School.find({ status: "active" });
-
-  let totalTrainersRequired = 0;
-  let totalCurrentTrainers = 0;
-
-  schools.forEach((school) => {
-    totalTrainersRequired += school.trainersRequired;
-    totalCurrentTrainers += school.currentTrainers.length;
-  });
-
-  const shortage = Math.max(0, totalTrainersRequired - totalCurrentTrainers);
-
-  // Schools with critical shortage
-  const criticalSchools = schools.filter(
-    (school) => school.currentTrainers.length === 0,
-  ).length;
-
-  // Schools with adequate trainers
-  const adequateSchools = schools.filter(
-    (school) => school.currentTrainers.length >= school.trainersRequired,
-  ).length;
-
-  // Schools with shortage
-  const shortageSchools = schools.filter(
-    (school) =>
-      school.currentTrainers.length > 0 &&
-      school.currentTrainers.length < school.trainersRequired,
-  ).length;
-
-  res.json({
-    success: true,
-    data: {
-      totalSchools,
-      activeSchools,
-      inactiveSchools,
-      trainers: {
-        required: totalTrainersRequired,
-        current: totalCurrentTrainers,
-        shortage,
-        adequacy:
-          totalTrainersRequired > 0
-            ? Math.round((totalCurrentTrainers / totalTrainersRequired) * 100)
-            : 100,
-      },
-      schoolsStatus: {
-        critical: criticalSchools,
-        shortage: shortageSchools,
-        adequate: adequateSchools,
-      },
-    },
-  });
-});
-
-// Get school's trainers
-export const getSchoolTrainers = asyncHandler(async (req, res) => {
-
-  const { id } = req.params
-  if (!id || id === "undefined") {
-    return res.status(400).json({
-      success: false,
-      message: "Id not found",
-    });
-  }
-  const school = await School.findById(req.params?.id).populate({
-    path: "currentTrainers",
-    select: "basicInfo.fullName basicInfo.employeeId basicInfo.designation",
-    populate: {
-      path: "user",
-      select: "name email",
-    },
-  });
-
-  if (!school) {
-    return res.status(400).json({
-      success: false,
-      message: "School not found",
-    });
-  }
-
-  res.json({
-    success: true,
-    data: {
-      school: {
-        _id: school._id,
-        name: school.name,
-        trainersRequired: school.trainersRequired,
-        currentCount: school.currentTrainers.length,
-        needed: Math.max(
-          0,
-          school.trainersRequired - school.currentTrainers.length,
-        ),
-      },
-      trainers: school.currentTrainers,
-    },
-  });
-});
+export default mongoose.model("EmployeePosting", employeePostingSchema);
 
 
 import mongoose from 'mongoose';
@@ -2214,194 +1683,39 @@ employeeSchema.index({ 'completionStatus.overallPercentage': 1 });
 
 export default mongoose.model('Employee', employeeSchema);
 
+import mongoose from 'mongoose';
 
-
-import mongoose from "mongoose";
-
-const employeePostingSchema = new mongoose.Schema(
-  {
-    employee: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Employee",
-      required: true,
-    },
-    school: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "School",
-      required: true,
-    },
-    // Add these fields to EmployeePosting model
-    monthlyBillingSalary: {
-      type: Number,
-      required: [true, "Billing rate is required"],
-      min: [0, "Billing rate cannot be negative"],
-    },
-    tdsPercent: {
-      type: Number,
-      default: 0,
-      min: 0,
-      max: 100,
-    },
-    gstPercent: {
-      type: Number,
-      default: 0,
-      min: 0,
-      max: 100,
-    },
-    startDate: {
-      type: Date,
-      default: Date.now,
-      required: true,
-    },
-    endDate: {
-      type: Date,
-    },
-    status: {
-      type: String,
-      enum: ["continue", "resign", "terminate", "change_school"],
-      default: "continue",
-      required: true,
-    },
-    remark: String,
-    createdBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
-    updatedBy: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-    },
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
+const holidaySchema = new mongoose.Schema({
+  date: {
+    type: Date,
+    required: true,
+    unique: true
   },
-  {
-    timestamps: true,
-    toJSON: { virtuals: true },
-    toObject: { virtuals: true },
+  name: {
+    type: String,
+    required: true,
+    trim: true
   },
-);
-
-// ✅ Virtual for total billing
-employeePostingSchema.virtual("totalBilling").get(function () {
-  if (!this.endDate) return null;
-  const days = Math.ceil(
-    (this.endDate - this.startDate) / (1000 * 60 * 60 * 24),
-  );
-  const months = days / 30;
-  return this.billingRate * months;
-});
-
-// ✅ Pre-save validation
-employeePostingSchema.pre("save", function (next) {
-  if (this.isActive && !this.monthlyBillingSalary) {
-    next(new Error("Billing rate is required for active postings"));
+  description: {
+    type: String,
+    trim: true
+  },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  updatedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
   }
-  if (this.isActive && this.monthlyBillingSalary <= 0) {
-    next(new Error("Billing rate must be greater than 0"));
-  }
-  next();
+}, {
+  timestamps: true
 });
 
-/* =====================================================
-   🛡 LOOP PROTECTION
-===================================================== */
-employeePostingSchema.pre("save", function (next) {
-  if (this._skipHook) return next();
-  next();
-});
+holidaySchema.index({ date: 1 });
 
-/* =====================================================
-   POST SAVE
-===================================================== */
-employeePostingSchema.post("save", async function (doc) {
-  if (doc._skipHook) return;
-  await handleTrainerUpdate(doc);
-});
-
-/* =====================================================
-   POST FINDONEANDUPDATE
-===================================================== */
-employeePostingSchema.post("findOneAndUpdate", async function () {
-  const doc = await this.model.findOne(this.getQuery());
-  if (!doc || doc._skipHook) return;
-  await handleTrainerUpdate(doc);
-});
-
-/* =====================================================
-   🔥 MAIN LOGIC WITH BILLING RATE VALIDATION
-===================================================== */
-async function handleTrainerUpdate(posting) {
-  const School = mongoose.model("School");
-  const EmployeePosting = mongoose.model("EmployeePosting");
-
-  const employeeId = posting.employee;
-  const schoolId = posting.school;
-
-  /* ---------------- RESIGN / TERMINATE ---------------- */
-  if (posting.status === "resign" || posting.status === "terminate") {
-    await School.findByIdAndUpdate(schoolId, {
-      $pull: { currentTrainers: employeeId },
-    });
-
-    posting.isActive = false;
-    posting.endDate = new Date();
-    posting._skipHook = true;
-    await posting.save({ validateBeforeSave: false });
-  } else if (
-
-  /* ---------------- CHANGE SCHOOL / CONTINUE ---------------- */
-    posting.status === "change_school" ||
-    posting.status === "continue"
-  ) {
-    //  Validate billing rate before activation
-    if (!posting.billingRate || posting.billingRate <= 0) {
-      console.error(`Invalid billing rate for posting ${posting._id}`);
-      // Aap yahan error throw kar sakte ho ya default set kar sakte ho
-      // throw new Error('Cannot activate posting without valid billing rate');
-    }
-
-    const otherPostings = await EmployeePosting.find({
-      employee: employeeId,
-      isActive: true,
-      _id: { $ne: posting._id },
-    });
-
-    for (const old of otherPostings) {
-      await School.findByIdAndUpdate(old.school, {
-        $pull: { currentTrainers: employeeId },
-      });
-
-      old.isActive = false;
-      old.endDate = new Date();
-      old._skipHook = true;
-      await old.save({ validateBeforeSave: false });
-    }
-
-    await School.findByIdAndUpdate(schoolId, {
-      $addToSet: { currentTrainers: employeeId },
-    });
-
-    posting.isActive = true;
-    posting._skipHook = true;
-    await posting.save({ validateBeforeSave: false });
-  }
-}
-
-/* =====================================================
-   INDEXES - UPDATED
-===================================================== */
-employeePostingSchema.index({ employee: 1, isActive: 1 });
-employeePostingSchema.index({ school: 1, isActive: 1 });
-employeePostingSchema.index({ status: 1 });
-employeePostingSchema.index({ billingRate: 1 });
-employeePostingSchema.index({ school: 1, isActive: 1, billingRate: 1 });
-
-export default mongoose.model("EmployeePosting", employeePostingSchema);
-
-
+export default mongoose.model('Holiday', holidaySchema);
 
 // models/Invoice.js
 import mongoose from "mongoose";
@@ -2539,6 +1853,10 @@ const invoiceSchema = new mongoose.Schema(
     grandTotal: {
       type: Number,
       required: true,
+    },
+    previousDue: {
+      type: Number,
+      default: 0,
     },
 
     // Status
@@ -2685,8 +2003,9 @@ invoiceSchema.methods.calculateTotals = function () {
   // Calculate GST
   this.gstAmount = (this.subtotal * this.gstPercent) / 100;
 
-  // Calculate grand total
-  let total = this.subtotal - this.tdsAmount + this.gstAmount;
+  // Calculate grand total INCLUDING previous due
+  let total =
+    this.subtotal - this.tdsAmount + this.gstAmount + (this.previousDue || 0); // ⬅️ YEH CHANGE
 
   // Apply round off
   this.roundOff = Math.round(total) - total;
@@ -2696,6 +2015,7 @@ invoiceSchema.methods.calculateTotals = function () {
     subtotal: this.subtotal,
     tdsAmount: this.tdsAmount,
     gstAmount: this.gstAmount,
+    previousDue: this.previousDue, // ⬅️ YEH BHI ADD KARO
     roundOff: this.roundOff,
     grandTotal: this.grandTotal,
   };
@@ -2715,72 +2035,125 @@ invoiceSchema.index({ dueDate: 1 });
 
 export default mongoose.model("Invoice", invoiceSchema);
 
-
 import mongoose from 'mongoose';
 
-const schoolSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: [true, 'School name is required'],
-    trim: true
-  },
-  city: {
-    type: String,
-    required: [true, 'City is required'],
-    trim: true
-  },
-  address: {
-    type: String,
-    required: [true, 'Address is required'],
-    trim: true  
-  },
-  contactPersonName: {
-    type: String,
-    required: [true, 'Contact person name is required'],
-    trim: true
-  },
-  mobile: {
-    type: String,
-    required: [true, 'Mobile number is required'],
-    validate: {
-      validator: function(v) {
-        return /^\d{10}$/.test(v);
-      },
-      message: 'Mobile number must be 10 digits'
-    }
-  },
-  email: {
-    type: String,
-    required: [true, 'Email is required'],
-    lowercase: true,
-    trim: true,
-    match: [/^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/, 'Please provide a valid email']
-  },
-  status: {
-    type: String,
-    enum: ['active', 'inactive'],
-    default: 'active'
-  },
-  trainersRequired: {
-    type: Number,
-    required: [true, 'Number of trainers required is needed'],
-    min: [1, 'At least 1 trainer is required'],
-    default: 1
-  },
-  currentTrainers: [{
+const leaveSchema = new mongoose.Schema({
+  employee: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Employee'
-  }],
-  logo: {
-    url: String,
-    public_id: String
+    ref: 'Employee',
+    required: true
   },
-  createdBy: {
+  user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
   },
-  updatedBy: {
+  leaveType: {
+    type: String,
+    enum: ['Casual', 'Sick', 'Earned', 'Maternity', 'Paternity', 'Unpaid'],
+    default: 'Casual'
+  },
+  fromDate: {
+    type: Date,
+    required: true
+  },
+  toDate: {
+    type: Date,
+    required: true
+  },
+  reason: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  status: {
+    type: String,
+    enum: ['Pending', 'Approved', 'Rejected', 'Cancelled'],
+    default: 'Pending'
+  },
+  totalDays: {
+    type: Number,
+    default: 1
+  },
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  approvedAt: Date,
+  rejectionReason: String
+}, {
+  timestamps: true
+});
+
+leaveSchema.pre('save', function(next) {
+  if (this.fromDate && this.toDate) {
+    const diffTime = Math.abs(this.toDate - this.fromDate);
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    this.totalDays = diffDays + 1;
+  }
+  next();
+});
+
+leaveSchema.index({ employee: 1, fromDate: 1 });
+leaveSchema.index({ status: 1 });
+
+export default mongoose.model('Leave', leaveSchema);
+
+
+
+// models/Payment.js
+import mongoose from 'mongoose';
+
+const paymentSchema = new mongoose.Schema({
+  school: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'School',
+    required: true
+  },
+  invoices: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Invoice'
+  }],
+  paymentNumber: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  amount: {
+    type: Number,
+    required: true
+  },
+  paymentDate: {
+    type: Date,
+    required: true
+  },
+  paymentMethod: {
+    type: String,
+    enum: ['Cash', 'Cheque', 'Bank Transfer', 'Online', 'DD'],
+    required: true
+  },
+  referenceNumber: String, // Cheque/Transaction number
+  bankName: String,
+  branch: String,
+  remarks: String,
+  status: {
+    type: String,
+    enum: ['Pending', 'Completed', 'Failed', 'Refunded'],
+    default: 'Pending'
+  },
+  receiptNumber: String,
+  receiptPdf: String,
+  receiptPublicId: String,
+  receivedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  verifiedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  verifiedAt: Date,
+  createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   }
@@ -2788,259 +2161,2147 @@ const schoolSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Virtual for current trainers count
-schoolSchema.virtual('trainersCount').get(function() {
-  return this.currentTrainers.length;
+paymentSchema.pre('save', async function(next) {
+  if (this.isNew && !this.paymentNumber) {
+    const date = new Date();
+    const year = date.getFullYear().toString().slice(-2);
+    const month = (date.getMonth() + 1).toString().padStart(2, '0');
+    
+    const lastPayment = await this.constructor.findOne().sort({ paymentNumber: -1 });
+    
+    let sequence = 1;
+    if (lastPayment && lastPayment.paymentNumber) {
+      const lastSeq = parseInt(lastPayment.paymentNumber.split('-')[2]);
+      sequence = lastSeq + 1;
+    }
+    
+    this.paymentNumber = `PAY-${year}${month}-${sequence.toString().padStart(4, '0')}`;
+  }
+  next();
 });
 
-// Virtual for trainer status
-schoolSchema.virtual('trainerStatus').get(function() {
-  const count = this.currentTrainers.length;
-  const required = this.trainersRequired;
-  
-  if (count >= required) return 'adequate';
-  if (count > 0 && count < required) return 'shortage';
-  return 'critical';
+export default mongoose.model('Payment', paymentSchema);
+
+
+// models/SchoolLedger.js
+import mongoose from 'mongoose';
+
+const schoolLedgerSchema = new mongoose.Schema({
+  school: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'School',
+    required: true
+  },
+  invoice: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Invoice'
+  },
+  transactionType: {
+    type: String,
+    enum: ['Invoice Generated', 'Payment Received', 'Adjustment', 'Credit Note', 'Debit Note'],
+    required: true
+  },
+  amount: {
+    type: Number,
+    required: true
+  },
+  balance: {
+    type: Number,
+    required: true
+  },
+  date: {
+    type: Date,
+    default: Date.now
+  },
+  month: Number,
+  year: Number,
+  description: String,
+  paymentMethod: {
+    type: String,
+    enum: ['Cash', 'Cheque', 'Bank Transfer', 'Online', 'DD']
+  },
+  reference: String, // Cheque/Transaction number
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  }
+}, {
+  timestamps: true
 });
 
-// Indexes
-schoolSchema.index({ city: 1 });
-schoolSchema.index({ status: 1 });
-schoolSchema.index({ 'currentTrainers': 1 });
+schoolLedgerSchema.index({ school: 1, date: -1 });
+schoolLedgerSchema.index({ invoice: 1 });
 
-const School = mongoose.model('School', schoolSchema);
-export default School;
-
-import express from "express";
-import { login } from "../controllers/authController.js";
-
-const router = express.Router();
-
-router.post("/login", login);
-
-export default router;
-
-// import express from 'express';
-// import { createEmployeePosting, getEmployeePostings } from '../controllers/EmployeePostingController.js';
-
-// import { authenticate } from '../middleware/auth.js'
-// import { requireAdminOrHR } from '../middleware/profileCompletion.js'
-
-// const router = express.Router();
-
-// router.route('/')
-//   .get(authenticate, requireAdminOrHR, getEmployeePostings)
-//   .post(authenticate, requireAdminOrHR, createEmployeePosting);
-
-// export default router;
+export default mongoose.model('SchoolLedger', schoolLedgerSchema);
 
 
 
-import express from "express";
-
+// pages/Invoices/Invoices.jsx
+import React, { useState, useEffect } from "react";
 import {
-  createEmployeePosting,
-  getEmployeePostings,
-  getEmployeePosting,
-  updateEmployeePosting,
-  getEmployeePostingHistory,
-  getEmployeeCurrentStatus,
-  getPostingAnalytics,
-  getAllActiveEmployees,
-  getActiveEmployeebyId
-} from "../controllers/EmployeePostingController.js";
-
-import { authenticate } from "../middleware/auth.js";
-import { requireAdminOrHR } from "../middleware/profileCompletion.js";
-
-const router = express.Router();
-
-
-// ==============================
-// POSTING CRUD
-// ==============================
-
-// Create + Get All
-router.route("/")
-  .get(authenticate, requireAdminOrHR, getEmployeePostings)
-  .post(authenticate, requireAdminOrHR, createEmployeePosting);
-
-// Single Posting
-router.route("/:id")
-  .get(authenticate, requireAdminOrHR, getEmployeePosting)
-  .put(authenticate, requireAdminOrHR, updateEmployeePosting);
-
-
-// ==============================
-// EMPLOYEE RELATED
-// ==============================
-
-// Employee posting history
-router.get(
-  "/history/:employeeId",
-  authenticate,
-  requireAdminOrHR,
-  getEmployeePostingHistory
-);
-
-// Employee current status
-router.get(
-  "/current/:employeeId",
-  authenticate,
-  requireAdminOrHR,
-  getEmployeeCurrentStatus
-);
-
-
-// ==============================
-// ANALYTICS
-// ==============================
-
-router.get(
-  "/analytics/overview",
-  authenticate,
-  requireAdminOrHR,
-  getPostingAnalytics
-);
-
-
-// ==============================
-// ACTIVE EMPLOYEES
-// ==============================
-
-// All active employees
-router.get(
-  "/employees/active",
-  authenticate,
-  requireAdminOrHR,
-  getAllActiveEmployees
-);
-
-// Active employee by ID
-router.get(
-  "/employees/active/:id",
-  authenticate,
-  requireAdminOrHR,
-  getActiveEmployeebyId
-);
-
-
-export default router;
-
-
-import express from "express";
-import { authenticate } from '../middleware/auth.js';
-import { requireAdminOrHR } from '../middleware/profileCompletion.js';
-import {createEmployee, getAllEmployees, getEmployeeById } from "../controllers/employeeController.js";
-
-const router = express.Router();
-
-/* ================= CREATE STUDENT ================= */
-
-router.post('/hr/create', authenticate, requireAdminOrHR, createEmployee);
-router.get('/hr/employees', authenticate, requireAdminOrHR, getAllEmployees);
-router.get(
-  '/hr/employees/:id',
-  authenticate,
-  requireAdminOrHR,
-  getEmployeeById
-);
-
-export default router;
-
-
-
-// routes/invoiceRoutes.js
-import express from 'express';
+  Box,
+  Paper,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  TablePagination,
+  TextField,
+  Button,
+  IconButton,
+  Chip,
+  MenuItem,
+  Grid,
+  Typography,
+  Tooltip,
+  CircularProgress,
+  Alert,
+  FormControl,
+  InputLabel,
+  Select,
+  Card,
+  CardContent,
+  Checkbox,
+} from "@mui/material";
 import {
-  autoGenerateInvoices,
-  getInvoices,
-  getInvoice,
-  verifyInvoice,
-  sendInvoicesBulk,
-  getInvoiceStats,
-  recordPayment,
-  downloadInvoice,
-  cancelInvoice
-} from '../controllers/invoiceController.js';
-import { authenticate } from '../middleware/auth.js';
-import { requireAdminOrHR } from '../middleware/profileCompletion.js';
+  Visibility,
+  GetApp,
+  CheckCircle,
+  Send,
+  Payment,
+  Cancel,
+  FilterList,
+  Refresh,
+  PictureAsPdf,
+} from "@mui/icons-material";
+import { useNavigate } from "react-router-dom";
+import { format } from "date-fns";
+import toast from "react-hot-toast";
+import invoiceService from "../../services/invoiceService";
 
-const router = express.Router();
+const statusColors = {
+  Draft: "default",
+  Generated: "info",
+  Verified: "success",
+  Sent: "primary",
+  Paid: "success",
+  Cancelled: "error",
+};
 
-// All routes require authentication and admin access
-router.use(authenticate);
-router.use(requireAdminOrHR);
-router.get('/test-auto-invoice', autoGenerateInvoices);
-// Auto-generate invoices (called by cron job)
-router.post('/auto-generate', autoGenerateInvoices);
+const paymentStatusColors = {
+  Unpaid: "error",
+  Partial: "warning",
+  Paid: "success",
+  Overdue: "error",
+};
 
-// Dashboard stats
-router.get('/stats', getInvoiceStats);
+const Invoices = () => {
+  const navigate = useNavigate();
+  const [invoices, setInvoices] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(10);
+  const [total, setTotal] = useState(0);
+  const [filters, setFilters] = useState({
+    month: new Date().getMonth() + 1,
+    year: new Date().getFullYear(),
+    status: "",
+    paymentStatus: "",
+    search: "",
+  });
+  const [selectedInvoices, setSelectedInvoices] = useState([]);
+  const [generating, setGenerating] = useState(false);
+  const [sending, setSending] = useState(false);
 
-// Bulk send
-router.post('/send-bulk', sendInvoicesBulk);
+  useEffect(() => {
+    fetchInvoices();
+  }, [page, rowsPerPage, filters]);
 
-// Invoice CRUD
-router.route('/')
-  .get(getInvoices);
+  const fetchInvoices = async () => {
+    try {
+      setLoading(true);
+      const params = {
+        page: page + 1,
+        limit: rowsPerPage,
+        ...filters,
+      };
+      const response = await invoiceService.getInvoices(params);
+      setInvoices(response.data.data);
+      setTotal(response.data.pagination.total);
+    } catch (error) {
+      toast.error("Failed to fetch invoices");
+    } finally {
+      setLoading(false);
+    }
+  };
 
-router.route('/:id')
-  .get(getInvoice)
-  .delete(cancelInvoice);
+  const handleAutoGenerate = async () => {
+    if (
+      !window.confirm(`Generate invoices for ${filters.month}/${filters.year}?`)
+    )
+      return;
 
-// Verify invoice
-router.put('/:id/verify', verifyInvoice);
+    try {
+      setGenerating(true);
+      await invoiceService.autoGenerate({
+        manualMonth: filters.month,
+        manualYear: filters.year,
+      });
+      toast.success("Invoices generated successfully");
+      fetchInvoices();
+    } catch (error) {
+      toast.error(
+        error.response?.data?.message || "Failed to generate invoices",
+      );
+    } finally {
+      setGenerating(false);
+    }
+  };
 
-// Download PDF
-router.get('/:id/download', downloadInvoice);
+  const handleBulkSend = async () => {
+    if (selectedInvoices.length === 0) {
+      toast.error("Please select at least one invoice");
+      return;
+    }
 
-// Record payment
-router.post('/:id/payment', recordPayment);
+    if (!window.confirm(`Send ${selectedInvoices.length} invoices to schools?`))
+      return;
 
-export default router;
+    try {
+      setSending(true);
+      const response = await invoiceService.sendBulk(selectedInvoices);
+      toast.success(`Sent ${response.data.data.sent.length} invoices`);
+      setSelectedInvoices([]);
+      fetchInvoices();
+    } catch (error) {
+      toast.error("Failed to send invoices");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleDownload = async (id, invoiceNumber) => {
+    try {
+      const response = await invoiceService.downloadInvoice(id);
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `invoice_${invoiceNumber}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      toast.error("Failed to download invoice");
+    }
+  };
+
+  const handleSelectAll = (event) => {
+    if (event.target.checked) {
+      setSelectedInvoices(invoices.map((inv) => inv._id));
+    } else {
+      setSelectedInvoices([]);
+    }
+  };
+
+  const handleSelectOne = (id) => {
+    setSelectedInvoices((prev) => {
+      if (prev.includes(id)) {
+        return prev.filter((item) => item !== id);
+      } else {
+        return [...prev, id];
+      }
+    });
+  };
+
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: "INR",
+      minimumFractionDigits: 0,
+    }).format(amount);
+  };
+
+  return (
+    <Box sx={{ p: 3 }}>
+      {/* Header */}
+      <Box sx={{ display: "flex", justifyContent: "space-between", mb: 3 }}>
+        <Typography variant="h4">Invoices</Typography>
+        <Box sx={{ display: "flex", gap: 2 }}>
+          <Button
+            variant="outlined"
+            startIcon={<Refresh />}
+            onClick={fetchInvoices}
+          >
+            Refresh
+          </Button>
+          <Button
+            variant="contained"
+            color="primary"
+            startIcon={<PictureAsPdf />}
+            onClick={handleAutoGenerate}
+            disabled={generating}
+          >
+            {generating ? "Generating..." : "Generate Invoices"}
+          </Button>
+          {selectedInvoices.length > 0 && (
+            <Button
+              variant="contained"
+              color="success"
+              startIcon={<Send />}
+              onClick={handleBulkSend}
+              disabled={sending}
+            >
+              Send {selectedInvoices.length} Invoices
+            </Button>
+          )}
+        </Box>
+      </Box>
+
+      {/* Filters */}
+      <Paper sx={{ p: 2, mb: 3 }}>
+        <Grid container spacing={2} alignItems="center">
+          <Grid item xs={12} sm={2}>
+            <FormControl fullWidth size="small">
+              <InputLabel>Month</InputLabel>
+              <Select
+                value={filters.month}
+                label="Month"
+                onChange={(e) =>
+                  setFilters({ ...filters, month: e.target.value })
+                }
+              >
+                {Array.from({ length: 12 }, (_, i) => (
+                  <MenuItem key={i + 1} value={i + 1}>
+                    {new Date(2000, i, 1).toLocaleString("default", {
+                      month: "long",
+                    })}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={12} sm={2}>
+            <TextField
+              fullWidth
+              size="small"
+              label="Year"
+              type="number"
+              value={filters.year}
+              onChange={(e) => setFilters({ ...filters, year: e.target.value })}
+            />
+          </Grid>
+          <Grid item xs={12} sm={2}>
+            <FormControl fullWidth size="small">
+              <InputLabel>Status</InputLabel>
+              <Select
+                value={filters.status}
+                label="Status"
+                onChange={(e) =>
+                  setFilters({ ...filters, status: e.target.value })
+                }
+              >
+                <MenuItem value="">All</MenuItem>
+                <MenuItem value="Generated">Generated</MenuItem>
+                <MenuItem value="Verified">Verified</MenuItem>
+                <MenuItem value="Sent">Sent</MenuItem>
+                <MenuItem value="Paid">Paid</MenuItem>
+                <MenuItem value="Cancelled">Cancelled</MenuItem>
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={12} sm={2}>
+            <FormControl fullWidth size="small">
+              <InputLabel>Payment</InputLabel>
+              <Select
+                value={filters.paymentStatus}
+                label="Payment"
+                onChange={(e) =>
+                  setFilters({ ...filters, paymentStatus: e.target.value })
+                }
+              >
+                <MenuItem value="">All</MenuItem>
+                <MenuItem value="Unpaid">Unpaid</MenuItem>
+                <MenuItem value="Partial">Partial</MenuItem>
+                <MenuItem value="Paid">Paid</MenuItem>
+                <MenuItem value="Overdue">Overdue</MenuItem>
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={12} sm={4}>
+            <TextField
+              fullWidth
+              size="small"
+              label="Search by invoice or school"
+              value={filters.search}
+              onChange={(e) =>
+                setFilters({ ...filters, search: e.target.value })
+              }
+            />
+          </Grid>
+        </Grid>
+      </Paper>
+
+      {/* Table */}
+      <TableContainer component={Paper}>
+        <Table>
+          <TableHead>
+            <TableRow sx={{ bgcolor: "grey.100" }}>
+              <TableCell padding="checkbox">
+                <Checkbox
+                  indeterminate={
+                    selectedInvoices.length > 0 &&
+                    selectedInvoices.length < invoices.length
+                  }
+                  checked={
+                    invoices.length > 0 &&
+                    selectedInvoices.length === invoices.length
+                  }
+                  onChange={handleSelectAll}
+                />
+              </TableCell>
+              <TableCell>Invoice No.</TableCell>
+              <TableCell>School</TableCell>
+              <TableCell>Period</TableCell>
+              <TableCell align="right">Amount</TableCell>
+              <TableCell>Status</TableCell>
+              <TableCell>Payment</TableCell>
+              <TableCell>Generated</TableCell>
+              <TableCell align="center">Actions</TableCell>
+            </TableRow>
+          </TableHead>
+          <TableBody>
+            {loading ? (
+              <TableRow>
+                <TableCell colSpan={9} align="center" sx={{ py: 3 }}>
+                  <CircularProgress />
+                </TableCell>
+              </TableRow>
+            ) : invoices.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={9} align="center" sx={{ py: 3 }}>
+                  <Alert severity="info">No invoices found</Alert>
+                </TableCell>
+              </TableRow>
+            ) : (
+              invoices.map((invoice) => (
+                <TableRow key={invoice._id} hover>
+                  <TableCell padding="checkbox">
+                    <Checkbox
+                      checked={selectedInvoices.includes(invoice._id)}
+                      onChange={() => handleSelectOne(invoice._id)}
+                      disabled={invoice.status !== "Verified"}
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <Typography variant="body2" fontWeight="bold">
+                      {invoice.invoiceNumber}
+                    </Typography>
+                  </TableCell>
+                  <TableCell>{invoice.school?.name}</TableCell>
+                  <TableCell>
+                    {invoice.month}/{invoice.year}
+                  </TableCell>
+                  <TableCell align="right" fontWeight="bold">
+                    {formatCurrency(invoice.grandTotal)}
+                  </TableCell>
+                  <TableCell>
+                    <Chip
+                      label={invoice.status}
+                      size="small"
+                      color={statusColors[invoice.status] || "default"}
+                    />
+                  </TableCell>
+                  <TableCell>
+                    <Chip
+                      label={invoice.paymentStatus}
+                      size="small"
+                      color={
+                        paymentStatusColors[invoice.paymentStatus] || "default"
+                      }
+                    />
+                  </TableCell>
+                  <TableCell>
+                    {format(new Date(invoice.generatedAt), "dd/MM/yyyy")}
+                  </TableCell>
+                  <TableCell align="center">
+                    <Box
+                      sx={{
+                        display: "flex",
+                        gap: 0.5,
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Tooltip title="View">
+                        <IconButton
+                          size="small"
+                          color="primary"
+                          onClick={() => navigate(`/invoices/${invoice._id}`)}
+                        >
+                          <Visibility fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+
+                      {invoice.status === "Generated" && (
+                        <Tooltip title="Verify">
+                          <IconButton
+                            size="small"
+                            color="success"
+                            onClick={() =>
+                              navigate(`/invoices/${invoice._id}/verify`)
+                            }
+                          >
+                            <CheckCircle fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+
+                      {invoice.status === "Sent" &&
+                        invoice.paymentStatus !== "Paid" && (
+                          <Tooltip title="Record Payment">
+                            <IconButton
+                              size="small"
+                              color="warning"
+                              onClick={() =>
+                                navigate(`/invoices/${invoice._id}/payment`)
+                              }
+                            >
+                              <Payment fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        )}
+
+                      <Tooltip title="Download PDF">
+                        <IconButton
+                          size="small"
+                          color="info"
+                          onClick={() =>
+                            handleDownload(invoice._id, invoice.invoiceNumber)
+                          }
+                        >
+                          <GetApp fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
+                  </TableCell>
+                </TableRow>
+              ))
+            )}
+          </TableBody>
+        </Table>
+      </TableContainer>
+
+      <TablePagination
+        component="div"
+        count={total}
+        page={page}
+        onPageChange={(e, newPage) => setPage(newPage)}
+        rowsPerPage={rowsPerPage}
+        onRowsPerPageChange={(e) => {
+          setRowsPerPage(parseInt(e.target.value, 10));
+          setPage(0);
+        }}
+      />
+    </Box>
+  );
+};
+
+export default Invoices;
 
 
-import express from 'express';
+// pages/Invoices/InvoiceVerify.jsx (Fixed with Prorated Amount)
+
+import React, { useState, useEffect } from 'react';
 import {
-  createSchool,
-  getSchools,
-  getSchool,
-  updateSchool,
-  deleteSchool,
-  getSchoolStats,
-  getSchoolTrainers
-} from '../controllers/schoolController.js';
+  Box,
+  Paper,
+  Typography,
+  Grid,
+  TextField,
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  IconButton,
+  Chip,
+  Divider,
+  Alert,
+  CircularProgress,
+  InputAdornment
+} from '@mui/material';
+import {
+  ArrowBack,
+  Save,
+  Edit,
+  Cancel
+} from '@mui/icons-material';
+import { useParams, useNavigate } from 'react-router-dom';
+import toast from 'react-hot-toast';
+import invoiceService from '../../services/invoiceService';
 
-import { authenticate } from '../middleware/auth.js';
-import { requireAdminOrHR } from '../middleware/profileCompletion.js';
+const InvoiceVerify = () => {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [invoice, setInvoice] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [formData, setFormData] = useState({
+    tdsPercent: 0,
+    gstPercent: 0,
+    items: [],
+    notes: ''
+  });
 
-const router = express.Router();
+  useEffect(() => {
+    fetchInvoice();
+  }, [id]);
 
-// Create + Get All
-router.route('/')
-  .get(authenticate, getSchools)
-  .post(authenticate, requireAdminOrHR, createSchool);
+  const fetchInvoice = async () => {
+    try {
+      setLoading(true);
+      const response = await invoiceService.getInvoice(id);
+      const invoiceData = response.data.data;
+      
+      console.log('Invoice Data:', invoiceData);
+      
+      setInvoice(invoiceData);
+      
+      // Process items with correct field mapping
+      const processedItems = invoiceData.items.map(item => {
+        // Extract employee details
+        const employeeId = item.employee?._id || item.employee;
+        const employeeName = item.employeeName || item.employee?.basicInfo?.fullName || '';
+        const employeeIdString = item.employeeId || item.employee?.basicInfo?.employeeId || '';
+        
+        // Use the workingDays from the invoice data (15 days for March)
+        const workingDays = item.workingDays || 0;
+        
+        return {
+          ...item,
+          employeeObjectId: employeeId,
+          employeeName: employeeName,
+          employeeId: employeeIdString,
+          monthlyBillingSalary: item.monthlyBillingSalary,
+          leaveDays: item.leaveDays || 0,
+          adjustedLeaveDays: item.leaveDays || 0,
+          originalLeaveDays: item.leaveDays || 0,
+          workingDays: workingDays,
+          proratedAmount: item.proratedAmount || 0 // ✅ Store original prorated amount
+        };
+      });
+      
+      console.log('Processed Items:', processedItems);
+      
+      setFormData({
+        tdsPercent: invoiceData.tdsPercent || 0,
+        gstPercent: invoiceData.gstPercent || 0,
+        items: processedItems,
+        notes: invoiceData.notes || ''
+      });
+    } catch (error) {
+      console.error('Fetch error:', error);
+      toast.error('Failed to fetch invoice');
+      navigate('/invoices');
+    } finally {
+      setLoading(false);
+    }
+  };
 
-// Dashboard Stats
-router.get(
-  '/dashboard/stats',
-  authenticate,
-  requireAdminOrHR,
-  getSchoolStats
-);
+  const calculateItemDetails = (item) => {
+    const totalWorkingDays = item.workingDays || 0; // 15 days
+    const monthlySalary = item.monthlyBillingSalary || 0; // ₹60,000
+    
+    // Calculate daily rate based on working days
+    const dailyRate = monthlySalary / totalWorkingDays; // ₹4,000 per day
+    
+    // Get leave days (adjusted or original)
+    const leaveDays = item.adjustedLeaveDays !== undefined ? item.adjustedLeaveDays : (item.leaveDays || 0);
+    
+    // Calculate leave deduction
+    const leaveDeduction = Math.round(dailyRate * leaveDays); // ₹0 (if leaveDays = 0)
+    
+    // ✅ FIX: Net amount should be monthly salary minus leave deduction
+    // This should equal prorated amount (₹29,032) when leaveDays = 0
+    const netAmount = monthlySalary - leaveDeduction; // ₹60,000 - ₹0 = ₹60,000 ❌
+    
+    // ✅ CORRECT: Prorated amount should be based on working days, not full month
+    // For March: (15/31) * ₹60,000 = ₹29,032
+    const correctProratedAmount = Math.round((totalWorkingDays / 31) * monthlySalary);
+    
+    // Actual working days after leave
+    const actualWorkingDays = totalWorkingDays - leaveDays;
+    
+    return {
+      dailyRate: Math.round(dailyRate),
+      leaveDays,
+      leaveDeduction,
+      actualWorkingDays,
+      totalWorkingDays,
+      // ✅ Show prorated amount instead of full monthly salary
+      proratedAmount: item.proratedAmount || correctProratedAmount,
+      monthlySalary
+    };
+  };
 
-// Single School
-router.route('/:id')
-  .get(authenticate, getSchool)
-  .put(authenticate, requireAdminOrHR, updateSchool)
-  .delete(authenticate, requireAdminOrHR, deleteSchool);
+  const calculateTotals = () => {
+    // ✅ Use prorated amounts for subtotal, not full monthly salaries
+    const subtotal = formData.items.reduce((sum, item) => {
+      const details = calculateItemDetails(item);
+      return sum + details.proratedAmount;
+    }, 0);
+    
+    const tdsAmount = Math.round((subtotal * (formData.tdsPercent || 0)) / 100);
+    const gstAmount = Math.round((subtotal * (formData.gstPercent || 0)) / 100);
+    const grandTotal = subtotal - tdsAmount + gstAmount;
+    
+    return {
+      subtotal,
+      tdsAmount,
+      gstAmount,
+      grandTotal
+    };
+  };
 
-// School Trainers
-router.get(
-  '/:id/trainers',
-  authenticate,
-  getSchoolTrainers
-);
+  const handleLeaveAdjustment = (index, value) => {
+    const newItems = [...formData.items];
+    const totalWorkingDays = formData.items[index].workingDays || 0;
+    
+    const leaveValue = parseInt(value) || 0;
+    if (leaveValue >= 0 && leaveValue <= totalWorkingDays) {
+      newItems[index].adjustedLeaveDays = leaveValue;
+      
+      // Recalculate prorated amount based on new leave days
+      const monthlySalary = newItems[index].monthlyBillingSalary || 0;
+      const workingDays = newItems[index].workingDays || 0;
+      const newLeaveDays = leaveValue;
+      
+      // Calculate new prorated amount
+      // Formula: (monthlySalary / 31) * (workingDays - newLeaveDays)
+      const newProratedAmount = Math.round((monthlySalary / 31) * (workingDays - newLeaveDays));
+      newItems[index].proratedAmount = newProratedAmount;
+      
+      setFormData({ ...formData, items: newItems });
+    }
+  };
 
-export default router;
+  const handleSubmit = async () => {
+    try {
+      setSaving(true);
+      
+      const verifyItems = formData.items.map(item => {
+        const employeeId = item.employeeObjectId || item.employee?._id || item.employee;
+        
+        return {
+          employee: employeeId,
+          employeeName: item.employeeName,
+          employeeId: item.employeeId,
+          monthlyBillingSalary: item.monthlyBillingSalary,
+          leaveDays: item.adjustedLeaveDays !== undefined ? item.adjustedLeaveDays : (item.leaveDays || 0)
+        };
+      });
+      
+      const verifyData = {
+        tdsPercent: formData.tdsPercent || 0,
+        gstPercent: formData.gstPercent || 0,
+        items: verifyItems,
+        notes: formData.notes || ''
+      };
+      
+      console.log('Submitting verify data:', verifyData);
+      
+      const response = await invoiceService.verifyInvoice(id, verifyData);
+      toast.success('Invoice verified successfully');
+      navigate(`/invoices/${id}`);
+    } catch (error) {
+      console.error('Verification error:', error);
+      toast.error(error.response?.data?.message || 'Failed to verify invoice');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0
+    }).format(amount || 0);
+  };
+
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', p: 5 }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  if (!invoice) return null;
+
+  if (invoice.status !== 'Generated') {
+    return (
+      <Box sx={{ p: 3 }}>
+        <Alert severity="warning">
+          This invoice cannot be verified. Current status: {invoice.status}
+        </Alert>
+        <Button
+          sx={{ mt: 2 }}
+          variant="contained"
+          startIcon={<ArrowBack />}
+          onClick={() => navigate(`/invoices/${id}`)}
+        >
+          Back to Invoice
+        </Button>
+      </Box>
+    );
+  }
+
+  const totals = calculateTotals();
+
+  return (
+    <Box sx={{ p: 3 }}>
+      {/* Header */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
+        <IconButton onClick={() => navigate(`/invoices/${id}`)}>
+          <ArrowBack />
+        </IconButton>
+        <Typography variant="h4">
+          Verify Invoice {invoice.invoiceNumber}
+        </Typography>
+        <Chip label="Verification Mode" color="warning" icon={<Edit />} />
+      </Box>
+
+      <Grid container spacing={3}>
+        {/* Left - Invoice Items */}
+        <Grid item xs={12} md={8}>
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h6" gutterBottom>
+              Invoice Items (Adjust Leave Days)
+            </Typography>
+            
+            <TableContainer>
+              <Table>
+                <TableHead>
+                  <TableRow sx={{ bgcolor: 'grey.100' }}>
+                    <TableCell>Employee</TableCell>
+                    <TableCell align="right">Monthly Rate</TableCell>
+                    <TableCell align="center">Leave Days</TableCell>
+                    <TableCell align="right">Leave Deduction</TableCell>
+                    <TableCell align="center">Working Days</TableCell>
+                    <TableCell align="right">Prorated Amount</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {formData.items.map((item, index) => {
+                    const details = calculateItemDetails(item);
+                    return (
+                      <TableRow key={index}>
+                        <TableCell>
+                          <Typography variant="body2" fontWeight="bold">
+                            {item.employeeName || 'N/A'}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {item.employeeId || 'N/A'}
+                          </Typography>
+                        </TableCell>
+                        <TableCell align="right" fontWeight="bold">
+                          {formatCurrency(item.monthlyBillingSalary)}
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            Full Month
+                          </Typography>
+                        </TableCell>
+                        <TableCell align="center">
+                          <TextField
+                            type="number"
+                            size="small"
+                            value={details.leaveDays}
+                            onChange={(e) => handleLeaveAdjustment(index, e.target.value)}
+                            inputProps={{ 
+                              min: 0, 
+                              max: details.totalWorkingDays,
+                              step: 1
+                            }}
+                            sx={{ width: 80 }}
+                          />
+                        </TableCell>
+                        <TableCell align="right" sx={{ color: 'error.main' }}>
+                          - {formatCurrency(details.leaveDeduction)}
+                          <Typography variant="caption" display="block">
+                            ({details.leaveDays} days × {formatCurrency(details.dailyRate)}/day)
+                          </Typography>
+                        </TableCell>
+                        <TableCell align="center">
+                          <Chip 
+                            label={`${details.actualWorkingDays}/${details.totalWorkingDays}`}
+                            size="small"
+                            color={details.leaveDays > 0 ? "warning" : "success"}
+                          />
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            of {invoice.daysInMonth} total days
+                          </Typography>
+                        </TableCell>
+                        <TableCell align="right" fontWeight="bold" sx={{ color: 'primary.main' }}>
+                          {formatCurrency(details.proratedAmount)}
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            (Prorated Amount)
+                          </Typography>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </TableContainer>
+
+            {/* Summary Row */}
+            <Box sx={{ mt: 3, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
+              <Grid container spacing={2}>
+                <Grid item xs={4}>
+                  <Typography variant="body2" color="text.secondary">
+                    Total Monthly Billing:
+                  </Typography>
+                  <Typography variant="h6">
+                    {formatCurrency(formData.items.reduce((sum, item) => sum + (item.monthlyBillingSalary || 0), 0))}
+                  </Typography>
+                </Grid>
+                <Grid item xs={4}>
+                  <Typography variant="body2" color="text.secondary">
+                    Total Leave Deduction:
+                  </Typography>
+                  <Typography variant="h6" color="error.main">
+                    - {formatCurrency(formData.items.reduce((sum, item) => {
+                      const details = calculateItemDetails(item);
+                      return sum + details.leaveDeduction;
+                    }, 0))}
+                  </Typography>
+                </Grid>
+                <Grid item xs={4}>
+                  <Typography variant="body2" color="text.secondary">
+                    Subtotal (Prorated):
+                  </Typography>
+                  <Typography variant="h6" color="primary.main">
+                    {formatCurrency(totals.subtotal)}
+                  </Typography>
+                </Grid>
+              </Grid>
+            </Box>
+
+            <Box sx={{ mt: 3 }}>
+              <TextField
+                fullWidth
+                multiline
+                rows={3}
+                label="Verification Notes"
+                value={formData.notes}
+                onChange={(e) => setFormData({...formData, notes: e.target.value})}
+                placeholder="Add any notes about verification..."
+              />
+            </Box>
+          </Paper>
+        </Grid>
+
+        {/* Right - Summary & Actions */}
+        <Grid item xs={12} md={4}>
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h6" gutterBottom>
+              Verification Summary
+            </Typography>
+
+            <Box sx={{ mt: 3 }}>
+              <Grid container spacing={2}>
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    label="TDS Percent"
+                    type="number"
+                    value={formData.tdsPercent}
+                    onChange={(e) => setFormData({...formData, tdsPercent: parseFloat(e.target.value) || 0})}
+                    InputProps={{
+                      endAdornment: <InputAdornment position="end">%</InputAdornment>
+                    }}
+                    size="small"
+                  />
+                </Grid>
+
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    label="GST Percent"
+                    type="number"
+                    value={formData.gstPercent}
+                    onChange={(e) => setFormData({...formData, gstPercent: parseFloat(e.target.value) || 0})}
+                    InputProps={{
+                      endAdornment: <InputAdornment position="end">%</InputAdornment>
+                    }}
+                    size="small"
+                  />
+                </Grid>
+              </Grid>
+            </Box>
+
+            <Divider sx={{ my: 3 }} />
+
+            <Box>
+              <Grid container spacing={1}>
+                <Grid item xs={6}>
+                  <Typography variant="body2" color="text.secondary">
+                    Subtotal (Prorated):
+                  </Typography>
+                </Grid>
+                <Grid item xs={6}>
+                  <Typography variant="body2" align="right" fontWeight="bold">
+                    {formatCurrency(totals.subtotal)}
+                  </Typography>
+                </Grid>
+
+                <Grid item xs={6}>
+                  <Typography variant="body2" color="text.secondary">
+                    TDS ({formData.tdsPercent}%):
+                  </Typography>
+                </Grid>
+                <Grid item xs={6}>
+                  <Typography variant="body2" align="right" sx={{ color: 'error.main' }}>
+                    - {formatCurrency(totals.tdsAmount)}
+                  </Typography>
+                </Grid>
+
+                <Grid item xs={6}>
+                  <Typography variant="body2" color="text.secondary">
+                    GST ({formData.gstPercent}%):
+                  </Typography>
+                </Grid>
+                <Grid item xs={6}>
+                  <Typography variant="body2" align="right" sx={{ color: 'success.main' }}>
+                    + {formatCurrency(totals.gstAmount)}
+                  </Typography>
+                </Grid>
+
+                <Grid item xs={12}>
+                  <Divider sx={{ my: 1 }} />
+                </Grid>
+
+                <Grid item xs={6}>
+                  <Typography variant="h5" fontWeight="bold">
+                    Grand Total:
+                  </Typography>
+                </Grid>
+                <Grid item xs={6}>
+                  <Typography variant="h5" align="right" color="primary.main" fontWeight="bold">
+                    {formatCurrency(totals.grandTotal)}
+                  </Typography>
+                </Grid>
+              </Grid>
+            </Box>
+
+            <Box sx={{ mt: 4, display: 'flex', gap: 2 }}>
+              <Button
+                fullWidth
+                variant="outlined"
+                startIcon={<Cancel />}
+                onClick={() => navigate(`/invoices/${id}`)}
+              >
+                Cancel
+              </Button>
+              <Button
+                fullWidth
+                variant="contained"
+                color="success"
+                startIcon={<Save />}
+                onClick={handleSubmit}
+                disabled={saving}
+              >
+                {saving ? 'Verifying...' : 'Verify Invoice'}
+              </Button>
+            </Box>
+          </Paper>
+        </Grid>
+      </Grid>
+    </Box>
+  );
+};
+
+export default InvoiceVerify;
+
+// pages/Invoices/InvoiceView.jsx
+import React, { useState, useEffect } from "react";
+import {
+  Box,
+  Paper,
+  Typography,
+  Grid,
+  Divider,
+  Chip,
+  Button,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  IconButton,
+  Tooltip,
+  CircularProgress,
+  Alert,
+  Card,
+  CardContent,
+  Avatar 
+} from "@mui/material";
+import {
+  ArrowBack,
+  CheckCircle,
+  Payment,
+  GetApp,
+  Cancel,
+  Edit,
+} from "@mui/icons-material";
+import { useParams, useNavigate } from "react-router-dom";
+import { format } from "date-fns";
+import toast from "react-hot-toast";
+import invoiceService from "../../services/invoiceService";
+
+const statusColors = {
+  Draft: "default",
+  Generated: "info",
+  Verified: "success",
+  Sent: "primary",
+  Paid: "success",
+  Cancelled: "error",
+};
+
+const InvoiceView = () => {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [invoice, setInvoice] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchInvoice();
+  }, [id]);
+
+  const fetchInvoice = async () => {
+    try {
+      setLoading(true);
+      const response = await invoiceService.getInvoice(id);
+      setInvoice(response.data.data);
+    } catch (error) {
+      toast.error("Failed to fetch invoice");
+      navigate("/invoices");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDownload = async () => {
+    try {
+      const response = await invoiceService.downloadInvoice(id);
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement("a");
+      link.href = url;
+      link.setAttribute("download", `invoice_${invoice.invoiceNumber}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      toast.error("Failed to download invoice");
+    }
+  };
+
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat("en-IN", {
+      style: "currency",
+      currency: "INR",
+      minimumFractionDigits: 0,
+    }).format(amount);
+  };
+
+  if (loading) {
+    return (
+      <Box sx={{ display: "flex", justifyContent: "center", p: 5 }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  if (!invoice) {
+    return (
+      <Box sx={{ p: 3 }}>
+        <Alert severity="error">Invoice not found</Alert>
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ p: 3 }}>
+      {/* Header */}
+      <Box sx={{ display: "flex", justifyContent: "space-between", mb: 3 }}>
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
+          <IconButton onClick={() => navigate("/invoices")}>
+            <ArrowBack />
+          </IconButton>
+          <Typography variant="h4">Invoice {invoice.invoiceNumber}</Typography>
+          <Chip
+            label={invoice.status}
+            color={statusColors[invoice.status]}
+            size="small"
+          />
+          <Chip
+            label={invoice.paymentStatus}
+            color={invoice.paymentStatus === "Paid" ? "success" : "warning"}
+            size="small"
+          />
+        </Box>
+        <Box sx={{ display: "flex", gap: 2 }}>
+          {invoice.status === "Generated" && (
+            <Button
+              variant="contained"
+              color="success"
+              startIcon={<CheckCircle />}
+              onClick={() => navigate(`/invoices/${id}/verify`)}
+            >
+              Verify Invoice
+            </Button>
+          )}
+          {invoice.status === "Sent" && invoice.paymentStatus !== "Paid" && (
+            <Button
+              variant="contained"
+              color="warning"
+              startIcon={<Payment />}
+              onClick={() => navigate(`/invoices/${id}/payment`)}
+            >
+              {invoice.paymentStatus === "Partial"
+                ? "Add Remaining Payment"
+                : "Record Payment"}
+            </Button>
+          )}
+          <Button
+            variant="outlined"
+            startIcon={<GetApp />}
+            onClick={handleDownload}
+          >
+            Download PDF
+          </Button>
+        </Box>
+      </Box>
+
+      {/* School Details */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          School Details
+        </Typography>
+        <Grid container spacing={2}>
+          <Grid item xs={12} md={6}>
+            <Typography variant="subtitle2" color="text.secondary">
+              School Name
+            </Typography>
+            <Typography variant="body1" gutterBottom>
+              {invoice.school?.name}
+            </Typography>
+
+            <Typography variant="subtitle2" color="text.secondary">
+              Address
+            </Typography>
+            <Typography variant="body1" gutterBottom>
+              {invoice.schoolDetails?.address}, {invoice.schoolDetails?.city}
+            </Typography>
+          </Grid>
+          <Grid item xs={12} md={6}>
+            <Typography variant="subtitle2" color="text.secondary">
+              Contact Person
+            </Typography>
+            <Typography variant="body1" gutterBottom>
+              {invoice.schoolDetails?.contactPersonName}
+            </Typography>
+
+            <Typography variant="subtitle2" color="text.secondary">
+              Email / Mobile
+            </Typography>
+            <Typography variant="body1" gutterBottom>
+              {invoice.schoolDetails?.email} | {invoice.schoolDetails?.mobile}
+            </Typography>
+          </Grid>
+        </Grid>
+      </Paper>
+
+      {/* Invoice Items */}
+      <Paper sx={{ p: 3, mb: 3 }}>
+        <Typography variant="h6" gutterBottom>
+          Invoice Items
+        </Typography>
+        <TableContainer>
+          <Table>
+            <TableHead>
+              <TableRow sx={{ bgcolor: "grey.100" }}>
+                <TableCell>Sr No.</TableCell>
+                <TableCell>Employee Name</TableCell>
+                <TableCell>Employee ID</TableCell>
+                <TableCell align="right">Monthly Rate</TableCell>
+                <TableCell align="center">Leave Days</TableCell>
+                <TableCell align="center">Working Days</TableCell>
+                <TableCell align="right">Prorated Amount</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {invoice.items.map((item, index) => (
+                <TableRow key={index}>
+                  <TableCell>{index + 1}</TableCell>
+                  <TableCell>{item.employeeName}</TableCell>
+                  <TableCell>{item.employeeId}</TableCell>
+                  <TableCell align="right">
+                    {formatCurrency(item.monthlyBillingSalary)}
+                  </TableCell>
+                  <TableCell align="center">
+                    <Chip
+                      label={item.leaveDays}
+                      size="small"
+                      color={item.leaveDays > 0 ? "warning" : "success"}
+                    />
+                  </TableCell>
+                  <TableCell align="center">
+                    {item.workingDays}
+                  </TableCell>
+                  <TableCell align="right" fontWeight="bold">
+                    {formatCurrency(item.proratedAmount)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </Paper>
+
+      {/* Summary */}
+      <Grid container spacing={3}>
+        {/* Step-by-Step Calculation */}
+        <Grid item xs={12}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                📊 Invoice Calculation Breakdown
+              </Typography>
+              <Typography variant="body2" color="text.secondary" paragraph>
+                Here's how your invoice total was calculated, step by step:
+              </Typography>
+
+              <Box sx={{ mt: 3 }}>
+                {/* Step 1: Subtotal */}
+                <Paper
+                  variant="outlined"
+                  sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}
+                >
+                  <Grid container alignItems="center" spacing={2}>
+                    <Grid item xs={12} sm={1}>
+                      <Avatar
+                        sx={{
+                          bgcolor: "primary.main",
+                          width: 28,
+                          height: 28,
+                          fontSize: "0.875rem",
+                        }}
+                      >
+                        1
+                      </Avatar>
+                    </Grid>
+                    <Grid item xs={12} sm={5}>
+                      <Typography variant="subtitle1" fontWeight="medium">
+                        Calculate Subtotal
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Sum of all employee prorated amounts
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
+                        <Typography variant="body2">
+                          Total of all items:
+                        </Typography>
+                        <Typography variant="h6" color="primary">
+                          {formatCurrency(invoice.subtotal)}
+                        </Typography>
+                      </Box>
+                      <Box sx={{ mt: 1 }}>
+                        {invoice.items.map((item, idx) => (
+                          <Box
+                            key={idx}
+                            sx={{
+                              display: "flex",
+                              justifyContent: "space-between",
+                              fontSize: "0.875rem",
+                            }}
+                          >
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                            >
+                              {item.employeeName} ({item.actualWorkingDays}/
+                              {item.workingDays} days):
+                            </Typography>
+                            <Typography variant="caption">
+                              {formatCurrency(item.proratedAmount)}
+                            </Typography>
+                          </Box>
+                        ))}
+                      </Box>
+                    </Grid>
+                  </Grid>
+                </Paper>
+
+                {/* Step 2: Apply TDS */}
+                <Paper
+                  variant="outlined"
+                  sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}
+                >
+                  <Grid container alignItems="center" spacing={2}>
+                    <Grid item xs={12} sm={1}>
+                      <Avatar
+                        sx={{
+                          bgcolor: "primary.main",
+                          width: 28,
+                          height: 28,
+                          fontSize: "0.875rem",
+                        }}
+                      >
+                        2
+                      </Avatar>
+                    </Grid>
+                    <Grid item xs={12} sm={5}>
+                      <Typography variant="subtitle1" fontWeight="medium">
+                        Apply TDS (Tax Deducted at Source)
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        TDS is calculated on the subtotal amount
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
+                        <Typography variant="body2">
+                          {invoice.tdsPercent}% of{" "}
+                          {formatCurrency(invoice.subtotal)}:
+                        </Typography>
+                        <Typography variant="h6" color="error">
+                          - {formatCurrency(invoice.tdsAmount)}
+                        </Typography>
+                      </Box>
+                      <Box
+                        sx={{
+                          mt: 1,
+                          p: 1,
+                          bgcolor: "error.light",
+                          borderRadius: 1,
+                        }}
+                      >
+                        <Typography variant="caption" color="error.dark">
+                          Amount after TDS:{" "}
+                          {formatCurrency(invoice.subtotal - invoice.tdsAmount)}
+                        </Typography>
+                      </Box>
+                    </Grid>
+                  </Grid>
+                </Paper>
+
+                {/* Step 3: Add GST */}
+                <Paper
+                  variant="outlined"
+                  sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}
+                >
+                  <Grid container alignItems="center" spacing={2}>
+                    <Grid item xs={12} sm={1}>
+                      <Avatar
+                        sx={{
+                          bgcolor: "primary.main",
+                          width: 28,
+                          height: 28,
+                          fontSize: "0.875rem",
+                        }}
+                      >
+                        3
+                      </Avatar>
+                    </Grid>
+                    <Grid item xs={12} sm={5}>
+                      <Typography variant="subtitle1" fontWeight="medium">
+                        Add GST (Goods & Services Tax)
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        GST is applied after TDS deduction
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
+                        <Typography variant="body2">
+                          {invoice.gstPercent}% of (Subtotal - TDS):
+                        </Typography>
+                        <Typography variant="h6" color="success.main">
+                          + {formatCurrency(invoice.gstAmount)}
+                        </Typography>
+                      </Box>
+                      <Box sx={{ mt: 1 }}>
+                        <Typography variant="caption" display="block">
+                          Calculation: {invoice.gstPercent}% of{" "}
+                          {formatCurrency(invoice.subtotal - invoice.tdsAmount)}
+                        </Typography>
+                      </Box>
+                    </Grid>
+                  </Grid>
+                </Paper>
+
+                {/* Step 4: Round Off */}
+                <Paper
+                  variant="outlined"
+                  sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}
+                >
+                  <Grid container alignItems="center" spacing={2}>
+                    <Grid item xs={12} sm={1}>
+                      <Avatar
+                        sx={{
+                          bgcolor: "primary.main",
+                          width: 28,
+                          height: 28,
+                          fontSize: "0.875rem",
+                        }}
+                      >
+                        4
+                      </Avatar>
+                    </Grid>
+                    <Grid item xs={12} sm={5}>
+                      <Typography variant="subtitle1" fontWeight="medium">
+                        Round Off Adjustment
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Round to nearest whole number
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
+                        <Typography variant="body2">
+                          Round off adjustment:
+                        </Typography>
+                        <Typography variant="h6">
+                          {formatCurrency(invoice.roundOff)}
+                        </Typography>
+                      </Box>
+                      <Box sx={{ mt: 1 }}>
+                        <Typography variant="caption" color="text.secondary">
+                          Before rounding:{" "}
+                          {formatCurrency(
+                            invoice.subtotal -
+                              invoice.tdsAmount +
+                              invoice.gstAmount,
+                          )}
+                        </Typography>
+                      </Box>
+                    </Grid>
+                  </Grid>
+                </Paper>
+
+                {/* Final Total */}
+                <Paper
+                  variant="outlined"
+                  sx={{
+                    p: 2,
+                    bgcolor: "primary.light",
+                    border: "2px solid",
+                    borderColor: "primary.main",
+                  }}
+                >
+                  <Grid container alignItems="center" spacing={2}>
+                    <Grid item xs={12} sm={1}>
+                      <Avatar
+                        sx={{
+                          bgcolor: "success.main",
+                          width: 28,
+                          height: 28,
+                          fontSize: "0.875rem",
+                        }}
+                      >
+                        ✓
+                      </Avatar>
+                    </Grid>
+                    <Grid item xs={12} sm={5}>
+                      <Typography
+                        variant="h6"
+                        fontWeight="bold"
+                        color="primary.dark"
+                      >
+                        Final Amount
+                      </Typography>
+                      <Typography variant="body2" color="primary.dark">
+                        Total invoice amount after all calculations
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <Box
+                        sx={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                        }}
+                      >
+                        <Typography
+                          variant="h5"
+                          fontWeight="bold"
+                          color="primary.dark"
+                        >
+                          GRAND TOTAL:
+                        </Typography>
+                        <Typography
+                          variant="h4"
+                          fontWeight="bold"
+                          color="primary.dark"
+                        >
+                          {formatCurrency(invoice.grandTotal)}
+                        </Typography>
+                      </Box>
+                      <Box
+                        sx={{
+                          mt: 1,
+                          display: "flex",
+                          justifyContent: "flex-end",
+                        }}
+                      >
+                        <Typography variant="caption" color="primary.dark">
+                          = Subtotal - TDS + GST ± Round Off
+                        </Typography>
+                      </Box>
+                    </Grid>
+                  </Grid>
+                </Paper>
+              </Box>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        <Grid item xs={12} md={6}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                💰 Payment Details
+              </Typography>
+              <Box sx={{ mt: 2 }}>
+                <Grid container spacing={1}>
+                  <Grid item xs={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      Payment Status:
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Chip
+                      label={invoice.paymentStatus}
+                      size="small"
+                      color={
+                        invoice.paymentStatus === "Paid" ? "success" : "warning"
+                      }
+                      sx={{ float: "right" }}
+                    />
+                  </Grid>
+
+                  <Grid item xs={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      Paid Amount:
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="body2" align="right" fontWeight="bold">
+                      {formatCurrency(invoice.paidAmount || 0)}
+                    </Typography>
+                  </Grid>
+
+                  <Grid item xs={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      Due Amount:
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography
+                      variant="body2"
+                      align="right"
+                      fontWeight="bold"
+                      color="error"
+                    >
+                      {formatCurrency(
+                        invoice.grandTotal - (invoice.paidAmount || 0),
+                      )}
+                    </Typography>
+                  </Grid>
+
+                  {invoice.paidAt && (
+                    <>
+                      <Grid item xs={6}>
+                        <Typography variant="body2" color="text.secondary">
+                          Paid On:
+                        </Typography>
+                      </Grid>
+                      <Grid item xs={6}>
+                        <Typography variant="body2" align="right">
+                          {format(new Date(invoice.paidAt), "dd/MM/yyyy")}
+                        </Typography>
+                      </Grid>
+                    </>
+                  )}
+                </Grid>
+              </Box>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {invoice.customizations?.leaveAdjustments?.length > 0 && (
+          <Grid item xs={12}>
+            <Card>
+              <CardContent>
+                <Typography variant="h6" gutterBottom color="warning.main">
+                  Customizations Applied
+                </Typography>
+                <TableContainer>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Employee</TableCell>
+                        <TableCell>Original Leave</TableCell>
+                        <TableCell>Adjusted Leave</TableCell>
+                        <TableCell>Reason</TableCell>
+                        <TableCell>Adjusted By</TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {invoice.customizations.leaveAdjustments.map(
+                        (adj, index) => (
+                          <TableRow key={index}>
+                            <TableCell>
+                              {adj.employee?.basicInfo?.fullName}
+                            </TableCell>
+                            <TableCell>{adj.originalLeaveDays}</TableCell>
+                            <TableCell>{adj.adjustedLeaveDays}</TableCell>
+                            <TableCell>{adj.reason}</TableCell>
+                            <TableCell>{adj.adjustedBy?.name}</TableCell>
+                          </TableRow>
+                        ),
+                      )}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </CardContent>
+            </Card>
+          </Grid>
+        )}
+
+        {invoice.notes && (
+          <Grid item xs={12}>
+            <Card>
+              <CardContent>
+                <Typography variant="subtitle2" color="text.secondary">
+                  Notes
+                </Typography>
+                <Typography variant="body2">{invoice.notes}</Typography>
+              </CardContent>
+            </Card>
+          </Grid>
+        )}
+      </Grid>
+    </Box>
+  );
+};
+
+export default InvoiceView;
+
+
+// pages/Invoices/InvoicePayment.jsx
+import React, { useState, useEffect } from 'react';
+import {
+  Box,
+  Paper,
+  Typography,
+  Grid,
+  TextField,
+  Button,
+  MenuItem,
+  Divider,
+  Alert,
+  CircularProgress,
+  Card,
+  CardContent,
+  InputAdornment,
+  IconButton 
+} from '@mui/material';
+import {
+  ArrowBack,
+  Payment as PaymentIcon
+} from '@mui/icons-material';
+import { useParams, useNavigate } from 'react-router-dom';
+import { format } from 'date-fns';
+import toast from 'react-hot-toast';
+import invoiceService from '../../services/invoiceService';
+
+const paymentMethods = [
+  { value: 'Cash', label: 'Cash' },
+  { value: 'Cheque', label: 'Cheque' },
+  { value: 'Bank Transfer', label: 'Bank Transfer' },
+  { value: 'Online', label: 'Online' },
+  { value: 'DD', label: 'Demand Draft' }
+];
+
+const InvoicePayment = () => {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const [invoice, setInvoice] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [formData, setFormData] = useState({
+    amount: '',
+    paymentDate: format(new Date(), 'yyyy-MM-dd'),
+    paymentMethod: 'Bank Transfer',
+    referenceNumber: '',
+    bankName: '',
+    branch: '',
+    remarks: ''
+  });
+
+  useEffect(() => {
+    fetchInvoice();
+  }, [id]);
+
+  const fetchInvoice = async () => {
+    try {
+      setLoading(true);
+      const response = await invoiceService.getInvoice(id);
+      setInvoice(response.data.data);
+      
+      const dueAmount = response.data.data.grandTotal - (response.data.data.paidAmount || 0);
+      setFormData(prev => ({
+        ...prev,
+        amount: dueAmount
+      }));
+    } catch (error) {
+      toast.error('Failed to fetch invoice');
+      navigate('/invoices');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (!formData.amount || formData.amount <= 0) {
+      toast.error('Please enter valid amount');
+      return;
+    }
+
+    const dueAmount = invoice.grandTotal - (invoice.paidAmount || 0);
+    if (formData.amount > dueAmount) {
+      toast.error(`Amount cannot exceed due amount of ${formatCurrency(dueAmount)}`);
+      return;
+    }
+
+    try {
+      setSaving(true);
+      await invoiceService.recordPayment(id, formData);
+      toast.success('Payment recorded successfully');
+      navigate(`/invoices/${id}`);
+    } catch (error) {
+      toast.error(error.response?.data?.message || 'Failed to record payment');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const formatCurrency = (amount) => {
+    return new Intl.NumberFormat('en-IN', {
+      style: 'currency',
+      currency: 'INR',
+      minimumFractionDigits: 0
+    }).format(amount);
+  };
+
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', justifyContent: 'center', p: 5 }}>
+        <CircularProgress />
+      </Box>
+    );
+  }
+
+  if (!invoice) return null;
+
+  const dueAmount = invoice.grandTotal - (invoice.paidAmount || 0);
+
+  if (invoice.paymentStatus === 'Paid') {
+    return (
+      <Box sx={{ p: 3 }}>
+        <Alert severity="info">
+          This invoice is already fully paid.
+        </Alert>
+        <Button
+          sx={{ mt: 2 }}
+          variant="contained"
+          startIcon={<ArrowBack />}
+          onClick={() => navigate(`/invoices/${id}`)}
+        >
+          Back to Invoice
+        </Button>
+      </Box>
+    );
+  }
+
+  return (
+    <Box sx={{ p: 3 }}>
+      {/* Header */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
+        <IconButton onClick={() => navigate(`/invoices/${id}`)}>
+          <ArrowBack />
+        </IconButton>
+        <Typography variant="h4">
+          Record Payment - {invoice.invoiceNumber}
+        </Typography>
+      </Box>
+
+      <Grid container spacing={3}>
+        <Grid item xs={12} md={6}>
+          <Paper sx={{ p: 3 }}>
+            <Typography variant="h6" gutterBottom>
+              Payment Details
+            </Typography>
+
+            <form onSubmit={handleSubmit}>
+              <Grid container spacing={2}>
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    required
+                    label="Payment Amount"
+                    type="number"
+                    value={formData.amount}
+                    onChange={(e) => setFormData({...formData, amount: parseFloat(e.target.value)})}
+                    InputProps={{
+                      startAdornment: <InputAdornment position="start">₹</InputAdornment>
+                    }}
+                  />
+                </Grid>
+
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    required
+                    label="Payment Date"
+                    type="date"
+                    value={formData.paymentDate}
+                    onChange={(e) => setFormData({...formData, paymentDate: e.target.value})}
+                    InputLabelProps={{ shrink: true }}
+                  />
+                </Grid>
+
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    required
+                    select
+                    label="Payment Method"
+                    value={formData.paymentMethod}
+                    onChange={(e) => setFormData({...formData, paymentMethod: e.target.value})}
+                  >
+                    {paymentMethods.map(option => (
+                      <MenuItem key={option.value} value={option.value}>
+                        {option.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                </Grid>
+
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    label="Reference Number"
+                    value={formData.referenceNumber}
+                    onChange={(e) => setFormData({...formData, referenceNumber: e.target.value})}
+                    placeholder="Cheque/Transaction/UPI ID"
+                  />
+                </Grid>
+
+                {(formData.paymentMethod === 'Cheque' || formData.paymentMethod === 'Bank Transfer' || formData.paymentMethod === 'DD') && (
+                  <>
+                    <Grid item xs={12} sm={6}>
+                      <TextField
+                        fullWidth
+                        label="Bank Name"
+                        value={formData.bankName}
+                        onChange={(e) => setFormData({...formData, bankName: e.target.value})}
+                      />
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <TextField
+                        fullWidth
+                        label="Branch"
+                        value={formData.branch}
+                        onChange={(e) => setFormData({...formData, branch: e.target.value})}
+                      />
+                    </Grid>
+                  </>
+                )}
+
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    multiline
+                    rows={3}
+                    label="Remarks"
+                    value={formData.remarks}
+                    onChange={(e) => setFormData({...formData, remarks: e.target.value})}
+                  />
+                </Grid>
+
+                <Grid item xs={12}>
+                  <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
+                    <Button
+                      fullWidth
+                      variant="outlined"
+                      onClick={() => navigate(`/invoices/${id}`)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      fullWidth
+                      type="submit"
+                      variant="contained"
+                      color="primary"
+                      startIcon={<PaymentIcon />}
+                      disabled={saving}
+                    >
+                      {saving ? 'Recording...' : 'Record Payment'}
+                    </Button>
+                  </Box>
+                </Grid>
+              </Grid>
+            </form>
+          </Paper>
+        </Grid>
+
+        <Grid item xs={12} md={6}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Invoice Summary
+              </Typography>
+
+              <Box sx={{ mt: 3 }}>
+                <Grid container spacing={2}>
+                  <Grid item xs={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      Invoice Number:
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="body2" align="right" fontWeight="bold">
+                      {invoice.invoiceNumber}
+                    </Typography>
+                  </Grid>
+
+                  <Grid item xs={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      School:
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="body2" align="right">
+                      {invoice.school?.name}
+                    </Typography>
+                  </Grid>
+
+                  <Grid item xs={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      Period:
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="body2" align="right">
+                      {invoice.month}/{invoice.year}
+                    </Typography>
+                  </Grid>
+
+                  <Grid item xs={12}>
+                    <Divider sx={{ my: 1 }} />
+                  </Grid>
+
+                  <Grid item xs={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      Invoice Total:
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="body2" align="right" fontWeight="bold">
+                      {formatCurrency(invoice.grandTotal)}
+                    </Typography>
+                  </Grid>
+
+                  <Grid item xs={6}>
+                    <Typography variant="body2" color="text.secondary">
+                      Already Paid:
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="body2" align="right" color="success.main">
+                      {formatCurrency(invoice.paidAmount || 0)}
+                    </Typography>
+                  </Grid>
+
+                  <Grid item xs={6}>
+                    <Typography variant="h6">
+                      Due Amount:
+                    </Typography>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <Typography variant="h6" align="right" color="error.main">
+                      {formatCurrency(dueAmount)}
+                    </Typography>
+                  </Grid>
+
+                  {invoice.paidAt && (
+                    <>
+                      <Grid item xs={6}>
+                        <Typography variant="body2" color="text.secondary">
+                          Last Payment:
+                        </Typography>
+                      </Grid>
+                      <Grid item xs={6}>
+                        <Typography variant="body2" align="right">
+                          {format(new Date(invoice.paidAt), 'dd/MM/yyyy')}
+                        </Typography>
+                      </Grid>
+                    </>
+                  )}
+                </Grid>
+              </Box>
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+    </Box>
+  );
+};
+
+export default InvoicePayment;

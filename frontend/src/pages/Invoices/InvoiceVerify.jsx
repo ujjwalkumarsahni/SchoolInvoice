@@ -1,5 +1,4 @@
-// pages/Invoices/InvoiceVerify.jsx (Fixed for your exact data structure)
-
+// pages/Invoices/InvoiceVerify.jsx - Add re-verify UI
 import React, { useState, useEffect } from 'react';
 import {
   Box,
@@ -19,18 +18,27 @@ import {
   Divider,
   Alert,
   CircularProgress,
+  InputAdornment,
   Card,
   CardContent,
-  InputAdornment
+  Avatar,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  Tooltip
 } from '@mui/material';
 import {
   ArrowBack,
   Save,
-  CheckCircle,
   Edit,
-  Cancel
+  Cancel,
+  Info,
+  History,
+  Warning
 } from '@mui/icons-material';
 import { useParams, useNavigate } from 'react-router-dom';
+import { format } from 'date-fns';
 import toast from 'react-hot-toast';
 import invoiceService from '../../services/invoiceService';
 
@@ -40,11 +48,13 @@ const InvoiceVerify = () => {
   const [invoice, setInvoice] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [reVerifyDialog, setReVerifyDialog] = useState(false);
   const [formData, setFormData] = useState({
     tdsPercent: 0,
     gstPercent: 0,
     items: [],
-    notes: ''
+    notes: '',
+    forceReVerify: false
   });
 
   useEffect(() => {
@@ -57,49 +67,30 @@ const InvoiceVerify = () => {
       const response = await invoiceService.getInvoice(id);
       const invoiceData = response.data.data;
       
-      console.log('Invoice Data:', invoiceData);
+      setInvoice(invoiceData);
       
-      // Calculate days in month
-      const daysInMonth = new Date(invoiceData.year, invoiceData.month, 0).getDate();
-      
-      setInvoice({
-        ...invoiceData,
-        daysInMonth
-      });
-      
-      // ✅ FIX: Extract employee ID correctly from the nested object
+      // Process items with correct field mapping
       const processedItems = invoiceData.items.map(item => {
-        // Extract employee ID - it's in item.employee._id
-        const employeeId = item.employee?._id || item.employee;
-        
-        // Extract employee name from basicInfo
-        const employeeName = item.employeeName || item.employee?.basicInfo?.fullName || '';
-        
-        // Extract employee ID string
-        const employeeIdString = item.employeeId || item.employee?.basicInfo?.employeeId || '';
-        
         return {
           ...item,
-          // Store the actual ObjectId for backend
-          employeeObjectId: employeeId,
-          employeeName: employeeName,
-          employeeId: employeeIdString,
-          monthlyBillingSalary: item.monthlyBillingSalary,
+          employeeObjectId: item.employee?._id || item.employee,
+          employeeName: item.employeeName || item.employee?.basicInfo?.fullName || '',
+          employeeId: item.employeeId || item.employee?.basicInfo?.employeeId || '',
+          monthlyBillingSalary: item.monthlyBillingSalary || 0,
           leaveDays: item.leaveDays || 0,
           adjustedLeaveDays: item.leaveDays || 0,
           originalLeaveDays: item.leaveDays || 0,
-          workingDays: item.workingDays || daysInMonth,
-          actualWorkingDays: item.actualWorkingDays || daysInMonth
+          workingDays: item.workingDays || 0,
+          proratedAmount: item.proratedAmount || 0
         };
       });
-      
-      console.log('Processed Items:', processedItems);
       
       setFormData({
         tdsPercent: invoiceData.tdsPercent || 0,
         gstPercent: invoiceData.gstPercent || 0,
         items: processedItems,
-        notes: invoiceData.notes || ''
+        notes: '',
+        forceReVerify: false
       });
     } catch (error) {
       console.error('Fetch error:', error);
@@ -110,44 +101,54 @@ const InvoiceVerify = () => {
     }
   };
 
+  const getDaysInMonth = () => {
+    if (!invoice) return 30;
+    return new Date(invoice.year, invoice.month, 0).getDate();
+  };
+
   const calculateItemDetails = (item) => {
-    const daysInMonth = invoice?.daysInMonth || 31;
+    const daysInMonth = getDaysInMonth();
     const monthlySalary = item.monthlyBillingSalary || 0;
+    const workingDays = item.workingDays || daysInMonth;
     
-    const dailyRate = monthlySalary / daysInMonth;
+    // Daily rate based on actual working days
+    const dailyRate = workingDays > 0 ? monthlySalary / workingDays : 0;
+    
+    // Get leave days
     const leaveDays = item.adjustedLeaveDays !== undefined ? item.adjustedLeaveDays : (item.leaveDays || 0);
+    
+    // Calculate leave deduction
     const leaveDeduction = Math.round(dailyRate * leaveDays);
-    const netAmount = monthlySalary - leaveDeduction;
-    const actualWorkingDays = daysInMonth - leaveDays;
+    
+    // Prorated amount = monthly salary - leave deduction
+    const proratedAmount = monthlySalary - leaveDeduction;
+    
+    // Actual working days after leave
+    const actualWorkingDays = workingDays - leaveDays;
     
     return {
       dailyRate: Math.round(dailyRate),
       leaveDays,
       leaveDeduction,
       actualWorkingDays,
-      netAmount,
+      workingDays,
+      proratedAmount,
+      monthlySalary,
       daysInMonth
     };
   };
 
   const calculateTotals = () => {
-    const totalBilling = formData.items.reduce((sum, item) => 
-      sum + (item.monthlyBillingSalary || 0), 0
-    );
-    
-    const totalLeaveDeduction = formData.items.reduce((sum, item) => {
+    const subtotal = formData.items.reduce((sum, item) => {
       const details = calculateItemDetails(item);
-      return sum + details.leaveDeduction;
+      return sum + details.proratedAmount;
     }, 0);
     
-    const subtotal = totalBilling - totalLeaveDeduction;
     const tdsAmount = Math.round((subtotal * (formData.tdsPercent || 0)) / 100);
     const gstAmount = Math.round((subtotal * (formData.gstPercent || 0)) / 100);
     const grandTotal = subtotal - tdsAmount + gstAmount;
     
     return {
-      totalBilling,
-      totalLeaveDeduction,
       subtotal,
       tdsAmount,
       gstAmount,
@@ -157,95 +158,77 @@ const InvoiceVerify = () => {
 
   const handleLeaveAdjustment = (index, value) => {
     const newItems = [...formData.items];
-    const daysInMonth = invoice?.daysInMonth || 31;
+    const workingDays = formData.items[index].workingDays || getDaysInMonth();
     
     const leaveValue = parseInt(value) || 0;
-    if (leaveValue >= 0 && leaveValue <= daysInMonth) {
+    if (leaveValue >= 0 && leaveValue <= workingDays) {
       newItems[index].adjustedLeaveDays = leaveValue;
+      
+      // Recalculate prorated amount
+      const monthlySalary = newItems[index].monthlyBillingSalary || 0;
+      const dailyRate = workingDays > 0 ? monthlySalary / workingDays : 0;
+      const newProratedAmount = monthlySalary - Math.round(dailyRate * leaveValue);
+      
+      newItems[index].proratedAmount = newProratedAmount;
+      
       setFormData({ ...formData, items: newItems });
     }
   };
 
-  // ✅ FIX: Send CORRECT data structure with employee ID as string/ObjectId
   const handleSubmit = async () => {
+    // If invoice is already verified, show confirmation dialog
+    if (invoice?.status === 'Verified' && !formData.forceReVerify) {
+      setReVerifyDialog(true);
+      return;
+    }
+    
+    await submitVerification();
+  };
+
+  const submitVerification = async () => {
     try {
       setSaving(true);
       
-      // Prepare items with ALL required fields - EXACT format backend expects
       const verifyItems = formData.items.map(item => {
-        // Get the employee ID from the stored objectId
-        const employeeId = item.employeeObjectId || item.employee?._id || item.employee;
-        
-        // Log for debugging
-        console.log('Processing item for submission:', {
-          original: item,
-          extractedEmployeeId: employeeId,
-          employeeName: item.employeeName,
-          employeeIdString: item.employeeId,
-          monthlyBillingSalary: item.monthlyBillingSalary
-        });
-        
         return {
-          employee: employeeId,                    // ✅ Should be "69940fbfbdabd7a5ad853e85"
-          employeeName: item.employeeName,         // ✅ "kkkk Kumar"
-          employeeId: item.employeeId,             // ✅ "EMP102"
-          monthlyBillingSalary: item.monthlyBillingSalary, // ✅ 80000
-          leaveDays: item.adjustedLeaveDays !== undefined ? item.adjustedLeaveDays : (item.leaveDays || 0)
+          employee: item.employeeObjectId || item.employee?._id || item.employee,
+          employeeName: item.employeeName,
+          employeeId: item.employeeId,
+          monthlyBillingSalary: item.monthlyBillingSalary,
+          leaveDays: item.adjustedLeaveDays !== undefined ? item.adjustedLeaveDays : (item.leaveDays || 0),
+          reason: item.leaveDays !== item.adjustedLeaveDays ? 'Leave days adjusted during verification' : undefined
         };
       });
       
       const verifyData = {
-        tdsPercent: formData.tdsPercent || 0,
-        gstPercent: formData.gstPercent || 0,
+        tdsPercent: Number(formData.tdsPercent) || 0,
+        gstPercent: Number(formData.gstPercent) || 0,
         items: verifyItems,
-        notes: formData.notes || ''
+        notes: formData.notes || '',
+        forceReVerify: invoice?.status === 'Verified' // Send flag if re-verifying
       };
       
-      // 🔍 FINAL DEBUG - See exactly what's being sent
-      console.log('=== FINAL VERIFY DATA ===');
-      console.log('Full verify data:', JSON.stringify(verifyData, null, 2));
-      console.log('First item employee ID:', verifyData.items[0].employee);
-      console.log('First item type:', typeof verifyData.items[0].employee);
-      
-      // Validate before sending
-      let hasError = false;
-      verifyData.items.forEach((item, index) => {
-        if (!item.employee) {
-          console.error(`❌ Missing employee for item ${index}`);
-          hasError = true;
-        }
-        if (!item.employeeName) {
-          console.error(`❌ Missing employeeName for item ${index}`);
-          hasError = true;
-        }
-        if (!item.employeeId) {
-          console.error(`❌ Missing employeeId for item ${index}`);
-          hasError = true;
-        }
-        if (!item.monthlyBillingSalary) {
-          console.error(`❌ Missing monthlyBillingSalary for item ${index}`);
-          hasError = true;
-        }
-      });
-      
-      if (hasError) {
-        toast.error('Missing required fields. Check console for details.');
-        setSaving(false);
-        return;
-      }
-      
-      // Send to backend
       const response = await invoiceService.verifyInvoice(id, verifyData);
-      console.log('Verify response:', response);
       
-      toast.success('Invoice verified successfully');
+      const message = invoice?.status === 'Verified' 
+        ? 'Invoice re-verified successfully' 
+        : 'Invoice verified successfully';
+      
+      toast.success(message);
       navigate(`/invoices/${id}`);
     } catch (error) {
-      console.error('❌ Verification error:', error);
-      console.error('Error response:', error.response?.data);
-      toast.error(error.response?.data?.message || 'Failed to verify invoice');
+      console.error('Verification error:', error);
+      
+      // Handle specific error for already verified invoices
+      if (error.response?.data?.message?.includes('already verified')) {
+        toast.error('Invoice is already verified. Use re-verify option to make changes.');
+        setReVerifyDialog(true);
+      } else {
+        toast.error(error.response?.data?.message || 'Failed to verify invoice');
+      }
     } finally {
       setSaving(false);
+      setReVerifyDialog(false);
     }
   };
 
@@ -268,25 +251,9 @@ const InvoiceVerify = () => {
 
   if (!invoice) return null;
 
-  if (invoice.status !== 'Generated') {
-    return (
-      <Box sx={{ p: 3 }}>
-        <Alert severity="warning">
-          This invoice cannot be verified. Current status: {invoice.status}
-        </Alert>
-        <Button
-          sx={{ mt: 2 }}
-          variant="contained"
-          startIcon={<ArrowBack />}
-          onClick={() => navigate(`/invoices/${id}`)}
-        >
-          Back to Invoice
-        </Button>
-      </Box>
-    );
-  }
-
+  const isVerified = invoice.status === 'Verified';
   const totals = calculateTotals();
+  const daysInMonth = getDaysInMonth();
 
   return (
     <Box sx={{ p: 3 }}>
@@ -296,10 +263,42 @@ const InvoiceVerify = () => {
           <ArrowBack />
         </IconButton>
         <Typography variant="h4">
-          Verify Invoice {invoice.invoiceNumber}
+          {isVerified ? 'Re-verify' : 'Verify'} Invoice {invoice.invoiceNumber}
         </Typography>
-        <Chip label="Verification Mode" color="warning" icon={<Edit />} />
+        <Chip 
+          label={isVerified ? "Re-verification Mode" : "Verification Mode"} 
+          color={isVerified ? "secondary" : "warning"} 
+          icon={isVerified ? <History /> : <Edit />} 
+        />
+        
+        {/* Show verification history count */}
+        {invoice.verificationHistory?.length > 0 && (
+          <Tooltip title={`Verified ${invoice.verificationHistory.length} time(s)`}>
+            <Chip 
+              label={`v${invoice.verificationHistory.length}`}
+              size="small"
+              variant="outlined"
+            />
+          </Tooltip>
+        )}
       </Box>
+
+      {/* Warning for re-verification */}
+      {isVerified && (
+        <Alert severity="warning" sx={{ mb: 3 }} icon={<Warning />}>
+          <Typography variant="body2">
+            <strong>You are re-verifying an already verified invoice.</strong> Changes made will create a new verification record.
+          </Typography>
+        </Alert>
+      )}
+
+      {/* Info Banner */}
+      <Alert severity="info" sx={{ mb: 3 }} icon={<Info />}>
+        <Typography variant="body2">
+          <strong>How calculation works:</strong> Monthly rate is for actual working days in the month ({daysInMonth} total days in {invoice.month}/{invoice.year}). 
+          Daily rate = Monthly Rate ÷ Working Days. Leave deduction = Daily Rate × Leave Days.
+        </Typography>
+      </Alert>
 
       <Grid container spacing={3}>
         {/* Left - Invoice Items */}
@@ -310,7 +309,7 @@ const InvoiceVerify = () => {
             </Typography>
             
             <TableContainer>
-              <Table>
+              <Table size="small">
                 <TableHead>
                   <TableRow sx={{ bgcolor: 'grey.100' }}>
                     <TableCell>Employee</TableCell>
@@ -318,24 +317,39 @@ const InvoiceVerify = () => {
                     <TableCell align="center">Leave Days</TableCell>
                     <TableCell align="right">Leave Deduction</TableCell>
                     <TableCell align="center">Working Days</TableCell>
-                    <TableCell align="right">Net Amount</TableCell>
+                    <TableCell align="right">Prorated Amount</TableCell>
                   </TableRow>
                 </TableHead>
                 <TableBody>
                   {formData.items.map((item, index) => {
                     const details = calculateItemDetails(item);
+                    const hasChanges = item.leaveDays !== item.adjustedLeaveDays;
+                    
                     return (
-                      <TableRow key={index}>
+                      <TableRow key={index} sx={hasChanges ? { bgcolor: 'warning.light', opacity: 0.9 } : {}}>
                         <TableCell>
                           <Typography variant="body2" fontWeight="bold">
                             {item.employeeName || 'N/A'}
                           </Typography>
                           <Typography variant="caption" color="text.secondary">
-                            {item.employeeId || 'N/A'}
+                            ID: {item.employeeId || 'N/A'}
                           </Typography>
+                          {hasChanges && (
+                            <Chip 
+                              label="Modified" 
+                              size="small" 
+                              color="warning" 
+                              sx={{ mt: 0.5 }}
+                            />
+                          )}
                         </TableCell>
-                        <TableCell align="right" fontWeight="bold">
-                          {formatCurrency(item.monthlyBillingSalary)}
+                        <TableCell align="right">
+                          <Typography variant="body2" fontWeight="bold">
+                            {formatCurrency(item.monthlyBillingSalary)}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            For {details.workingDays} working days
+                          </Typography>
                         </TableCell>
                         <TableCell align="center">
                           <TextField
@@ -345,20 +359,37 @@ const InvoiceVerify = () => {
                             onChange={(e) => handleLeaveAdjustment(index, e.target.value)}
                             inputProps={{ 
                               min: 0, 
-                              max: invoice.daysInMonth,
-                              step: 1
+                              max: details.workingDays,
+                              step: 0.5
                             }}
-                            sx={{ width: 80 }}
+                            sx={{ width: 70 }}
                           />
                         </TableCell>
                         <TableCell align="right" sx={{ color: 'error.main' }}>
-                          - {formatCurrency(details.leaveDeduction)}
+                          <Typography variant="body2">
+                            - {formatCurrency(details.leaveDeduction)}
+                          </Typography>
+                          <Typography variant="caption" display="block">
+                            ({details.leaveDays} days × {formatCurrency(details.dailyRate)}/day)
+                          </Typography>
                         </TableCell>
                         <TableCell align="center">
-                          {details.actualWorkingDays}/{invoice.daysInMonth}
+                          <Chip 
+                            label={`${details.actualWorkingDays}/${details.workingDays}`}
+                            size="small"
+                            color={details.leaveDays > 0 ? "warning" : "success"}
+                          />
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            of {daysInMonth} total days
+                          </Typography>
                         </TableCell>
-                        <TableCell align="right" fontWeight="bold">
-                          {formatCurrency(details.netAmount)}
+                        <TableCell align="right" fontWeight="bold" sx={{ color: 'primary.main' }}>
+                          <Typography variant="body2" fontWeight="bold">
+                            {formatCurrency(details.proratedAmount)}
+                          </Typography>
+                          <Typography variant="caption" display="block" color="text.secondary">
+                            = Monthly Rate - Leave Deduction
+                          </Typography>
                         </TableCell>
                       </TableRow>
                     );
@@ -372,10 +403,10 @@ const InvoiceVerify = () => {
               <Grid container spacing={2}>
                 <Grid item xs={4}>
                   <Typography variant="body2" color="text.secondary">
-                    Total Billing:
+                    Total Monthly Billing:
                   </Typography>
                   <Typography variant="h6">
-                    {formatCurrency(totals.totalBilling)}
+                    {formatCurrency(formData.items.reduce((sum, item) => sum + (item.monthlyBillingSalary || 0), 0))}
                   </Typography>
                 </Grid>
                 <Grid item xs={4}>
@@ -383,12 +414,15 @@ const InvoiceVerify = () => {
                     Total Leave Deduction:
                   </Typography>
                   <Typography variant="h6" color="error.main">
-                    - {formatCurrency(totals.totalLeaveDeduction)}
+                    - {formatCurrency(formData.items.reduce((sum, item) => {
+                      const details = calculateItemDetails(item);
+                      return sum + details.leaveDeduction;
+                    }, 0))}
                   </Typography>
                 </Grid>
                 <Grid item xs={4}>
                   <Typography variant="body2" color="text.secondary">
-                    Subtotal:
+                    Subtotal (Prorated):
                   </Typography>
                   <Typography variant="h6" color="primary.main">
                     {formatCurrency(totals.subtotal)}
@@ -405,7 +439,7 @@ const InvoiceVerify = () => {
                 label="Verification Notes"
                 value={formData.notes}
                 onChange={(e) => setFormData({...formData, notes: e.target.value})}
-                placeholder="Add any notes about verification..."
+                placeholder={isVerified ? "Explain why you are re-verifying..." : "Add any notes about verification..."}
               />
             </Box>
           </Paper>
@@ -415,7 +449,7 @@ const InvoiceVerify = () => {
         <Grid item xs={12} md={4}>
           <Paper sx={{ p: 3 }}>
             <Typography variant="h6" gutterBottom>
-              Verification Summary
+              {isVerified ? 'Re-verification Summary' : 'Verification Summary'}
             </Typography>
 
             <Box sx={{ mt: 3 }}>
@@ -456,37 +490,11 @@ const InvoiceVerify = () => {
               <Grid container spacing={1}>
                 <Grid item xs={6}>
                   <Typography variant="body2" color="text.secondary">
-                    Total Billing:
+                    Subtotal (Prorated):
                   </Typography>
                 </Grid>
                 <Grid item xs={6}>
                   <Typography variant="body2" align="right" fontWeight="bold">
-                    {formatCurrency(totals.totalBilling)}
-                  </Typography>
-                </Grid>
-
-                <Grid item xs={6}>
-                  <Typography variant="body2" color="text.secondary">
-                    Less: Leave Deduction:
-                  </Typography>
-                </Grid>
-                <Grid item xs={6}>
-                  <Typography variant="body2" align="right" sx={{ color: 'error.main' }}>
-                    - {formatCurrency(totals.totalLeaveDeduction)}
-                  </Typography>
-                </Grid>
-
-                <Grid item xs={12}>
-                  <Divider sx={{ my: 1 }} />
-                </Grid>
-
-                <Grid item xs={6}>
-                  <Typography variant="body1" fontWeight="bold">
-                    Subtotal:
-                  </Typography>
-                </Grid>
-                <Grid item xs={6}>
-                  <Typography variant="body1" align="right" fontWeight="bold">
                     {formatCurrency(totals.subtotal)}
                   </Typography>
                 </Grid>
@@ -513,18 +521,33 @@ const InvoiceVerify = () => {
                   </Typography>
                 </Grid>
 
+                {invoice.previousDue > 0 && (
+                  <>
+                    <Grid item xs={6}>
+                      <Typography variant="body2" color="text.secondary">
+                        Previous Due:
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={6}>
+                      <Typography variant="body2" align="right" sx={{ color: 'warning.main' }}>
+                        + {formatCurrency(invoice.previousDue)}
+                      </Typography>
+                    </Grid>
+                  </>
+                )}
+
                 <Grid item xs={12}>
                   <Divider sx={{ my: 1 }} />
                 </Grid>
 
                 <Grid item xs={6}>
-                  <Typography variant="h5" fontWeight="bold">
+                  <Typography variant="h6" fontWeight="bold">
                     Grand Total:
                   </Typography>
                 </Grid>
                 <Grid item xs={6}>
-                  <Typography variant="h5" align="right" color="primary.main" fontWeight="bold">
-                    {formatCurrency(totals.grandTotal)}
+                  <Typography variant="h6" align="right" color="primary.main" fontWeight="bold">
+                    {formatCurrency(totals.grandTotal + (invoice.previousDue || 0))}
                   </Typography>
                 </Grid>
               </Grid>
@@ -542,17 +565,102 @@ const InvoiceVerify = () => {
               <Button
                 fullWidth
                 variant="contained"
-                color="success"
+                color={isVerified ? "secondary" : "success"}
                 startIcon={<Save />}
                 onClick={handleSubmit}
                 disabled={saving}
               >
-                {saving ? 'Verifying...' : 'Verify Invoice'}
+                {saving ? 'Processing...' : (isVerified ? 'Re-verify Invoice' : 'Verify Invoice')}
               </Button>
             </Box>
           </Paper>
+
+          {/* Verification History Card */}
+          {invoice.verificationHistory?.length > 0 && (
+            <Card sx={{ mt: 2 }}>
+              <CardContent>
+                <Typography variant="subtitle2" gutterBottom>
+                  📋 Verification History
+                </Typography>
+                {invoice.verificationHistory.map((history, idx) => (
+                  <Box key={idx} sx={{ mb: 2, pb: 1, borderBottom: idx < invoice.verificationHistory.length - 1 ? 1 : 0, borderColor: 'divider' }}>
+                    <Typography variant="caption" color="text.secondary" display="block">
+                      {format(new Date(history.verifiedAt), 'dd/MM/yyyy HH:mm')}
+                    </Typography>
+                    <Typography variant="body2">
+                      <Chip 
+                        label={history.status} 
+                        size="small" 
+                        color={history.status === 'Re-verified' ? 'secondary' : 'success'}
+                        sx={{ mr: 1 }}
+                      />
+                      by {history.verifiedBy?.name || 'Unknown'}
+                    </Typography>
+                    {history.changes?.length > 0 && (
+                      <Typography variant="caption" color="text.secondary" display="block">
+                        Changes: {history.changes.join(', ')}
+                      </Typography>
+                    )}
+                  </Box>
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Calculation Info Card */}
+          <Card sx={{ mt: 2 }}>
+            <CardContent>
+              <Typography variant="subtitle2" gutterBottom>
+                📊 Calculation Formula
+              </Typography>
+              <Typography variant="caption" display="block" paragraph>
+                <strong>Daily Rate</strong> = Monthly Rate ÷ Working Days
+              </Typography>
+              <Typography variant="caption" display="block" paragraph>
+                <strong>Leave Deduction</strong> = Daily Rate × Leave Days
+              </Typography>
+              <Typography variant="caption" display="block" paragraph>
+                <strong>Prorated Amount</strong> = Monthly Rate - Leave Deduction
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                * Working Days = Days employee was active in this month
+              </Typography>
+            </CardContent>
+          </Card>
         </Grid>
       </Grid>
+
+      {/* Re-verify Confirmation Dialog */}
+      <Dialog open={reVerifyDialog} onClose={() => setReVerifyDialog(false)}>
+        <DialogTitle>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <Warning color="warning" />
+            <Typography variant="h6">Re-verify Invoice?</Typography>
+          </Box>
+        </DialogTitle>
+        <DialogContent>
+          <Typography paragraph>
+            This invoice is already verified. Are you sure you want to modify and re-verify it?
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Changes will be tracked in verification history and a new verification record will be created.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setReVerifyDialog(false)}>Cancel</Button>
+          <Button 
+            onClick={() => {
+              setFormData({...formData, forceReVerify: true});
+              submitVerification();
+            }} 
+            variant="contained" 
+            color="warning"
+            autoFocus
+          >
+            Yes, Re-verify
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

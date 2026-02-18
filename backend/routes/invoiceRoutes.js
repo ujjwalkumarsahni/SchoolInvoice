@@ -10,7 +10,8 @@ import {
   getInvoiceStats,
   recordPayment,
   downloadInvoice,
-  cancelInvoice
+  cancelInvoice,
+  resendInvoice
 } from '../controllers/invoiceController.js';
 import { authenticate } from '../middleware/auth.js';
 import { requireAdminOrHR } from '../middleware/profileCompletion.js';
@@ -45,5 +46,9 @@ router.get('/:id/download', downloadInvoice);
 
 // Record payment
 router.post('/:id/payment', recordPayment);
+
+
+// Resend route
+router.post('/:id/resend', resendInvoice);
 
 export default router;

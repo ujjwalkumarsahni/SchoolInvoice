@@ -26,6 +26,8 @@ import {
   Card,
   CardContent,
   Checkbox,
+  Avatar,
+  Badge
 } from "@mui/material";
 import {
   Visibility,
@@ -34,9 +36,11 @@ import {
   Send,
   Payment,
   Cancel,
-  FilterList,
   Refresh,
   PictureAsPdf,
+  FilterList,
+  Download,
+  Receipt
 } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import { format } from "date-fns";
@@ -76,9 +80,12 @@ const Invoices = () => {
   const [selectedInvoices, setSelectedInvoices] = useState([]);
   const [generating, setGenerating] = useState(false);
   const [sending, setSending] = useState(false);
+  const [stats, setStats] = useState(null);
+  const [showFilters, setShowFilters] = useState(false);
 
   useEffect(() => {
     fetchInvoices();
+    fetchStats();
   }, [page, rowsPerPage, filters]);
 
   const fetchInvoices = async () => {
@@ -99,20 +106,31 @@ const Invoices = () => {
     }
   };
 
+  const fetchStats = async () => {
+    try {
+      const response = await invoiceService.getStats({
+        month: filters.month,
+        year: filters.year
+      });
+      setStats(response.data.data);
+    } catch (error) {
+      console.error('Failed to fetch stats:', error);
+    }
+  };
+
   const handleAutoGenerate = async () => {
-    if (
-      !window.confirm(`Generate invoices for ${filters.month}/${filters.year}?`)
-    )
+    if (!window.confirm(`Generate invoices for ${filters.month}/${filters.year}?`))
       return;
 
     try {
       setGenerating(true);
-      await invoiceService.autoGenerate({
+      const response = await invoiceService.autoGenerate({
         manualMonth: filters.month,
         manualYear: filters.year,
       });
-      toast.success("Invoices generated successfully");
+      toast.success(response.data.message || "Invoices generated successfully");
       fetchInvoices();
+      fetchStats();
     } catch (error) {
       toast.error(
         error.response?.data?.message || "Failed to generate invoices",
@@ -137,8 +155,9 @@ const Invoices = () => {
       toast.success(`Sent ${response.data.data.sent.length} invoices`);
       setSelectedInvoices([]);
       fetchInvoices();
+      fetchStats();
     } catch (error) {
-      toast.error("Failed to send invoices");
+      toast.error(error.response?.data?.message || "Failed to send invoices");
     } finally {
       setSending(false);
     }
@@ -154,6 +173,7 @@ const Invoices = () => {
       document.body.appendChild(link);
       link.click();
       link.remove();
+      toast.success("Download started");
     } catch (error) {
       toast.error("Failed to download invoice");
     }
@@ -185,18 +205,44 @@ const Invoices = () => {
     }).format(amount);
   };
 
+  const getTotalAmount = () => {
+    return invoices.reduce((sum, inv) => sum + inv.grandTotal, 0);
+  };
+
+  const getTotalDue = () => {
+    return invoices.reduce((sum, inv) => sum + (inv.grandTotal - (inv.paidAmount || 0)), 0);
+  };
+
   return (
     <Box sx={{ p: 3 }}>
       {/* Header */}
       <Box sx={{ display: "flex", justifyContent: "space-between", mb: 3 }}>
-        <Typography variant="h4">Invoices</Typography>
+        <Box>
+          <Typography variant="h4" gutterBottom>
+            Invoices
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Manage and track all school invoices
+          </Typography>
+        </Box>
         <Box sx={{ display: "flex", gap: 2 }}>
           <Button
             variant="outlined"
             startIcon={<Refresh />}
-            onClick={fetchInvoices}
+            onClick={() => {
+              fetchInvoices();
+              fetchStats();
+            }}
           >
             Refresh
+          </Button>
+          <Button
+            variant="outlined"
+            startIcon={<FilterList />}
+            onClick={() => setShowFilters(!showFilters)}
+            color={showFilters ? "primary" : "inherit"}
+          >
+            Filters
           </Button>
           <Button
             variant="contained"
@@ -215,95 +261,154 @@ const Invoices = () => {
               onClick={handleBulkSend}
               disabled={sending}
             >
-              Send {selectedInvoices.length} Invoices
+              Send {selectedInvoices.length} Invoice{selectedInvoices.length > 1 ? 's' : ''}
             </Button>
           )}
         </Box>
       </Box>
 
-      {/* Filters */}
-      <Paper sx={{ p: 2, mb: 3 }}>
-        <Grid container spacing={2} alignItems="center">
-          <Grid item xs={12} sm={2}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Month</InputLabel>
-              <Select
-                value={filters.month}
-                label="Month"
-                onChange={(e) =>
-                  setFilters({ ...filters, month: e.target.value })
-                }
-              >
-                {Array.from({ length: 12 }, (_, i) => (
-                  <MenuItem key={i + 1} value={i + 1}>
-                    {new Date(2000, i, 1).toLocaleString("default", {
-                      month: "long",
-                    })}
-                  </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+      {/* Stats Cards */}
+      {stats && (
+        <Grid container spacing={2} sx={{ mb: 3 }}>
+          <Grid item xs={12} sm={6} md={3}>
+            <Card>
+              <CardContent>
+                <Typography color="text.secondary" gutterBottom variant="body2">
+                  Total Invoices
+                </Typography>
+                <Typography variant="h4">
+                  {stats.byStatus?.reduce((sum, s) => sum + s.count, 0) || 0}
+                </Typography>
+              </CardContent>
+            </Card>
           </Grid>
-          <Grid item xs={12} sm={2}>
-            <TextField
-              fullWidth
-              size="small"
-              label="Year"
-              type="number"
-              value={filters.year}
-              onChange={(e) => setFilters({ ...filters, year: e.target.value })}
-            />
+          <Grid item xs={12} sm={6} md={3}>
+            <Card>
+              <CardContent>
+                <Typography color="text.secondary" gutterBottom variant="body2">
+                  Total Amount
+                </Typography>
+                <Typography variant="h4">
+                  {formatCurrency(stats.byStatus?.reduce((sum, s) => sum + s.totalAmount, 0) || 0)}
+                </Typography>
+              </CardContent>
+            </Card>
           </Grid>
-          <Grid item xs={12} sm={2}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Status</InputLabel>
-              <Select
-                value={filters.status}
-                label="Status"
-                onChange={(e) =>
-                  setFilters({ ...filters, status: e.target.value })
-                }
-              >
-                <MenuItem value="">All</MenuItem>
-                <MenuItem value="Generated">Generated</MenuItem>
-                <MenuItem value="Verified">Verified</MenuItem>
-                <MenuItem value="Sent">Sent</MenuItem>
-                <MenuItem value="Paid">Paid</MenuItem>
-                <MenuItem value="Cancelled">Cancelled</MenuItem>
-              </Select>
-            </FormControl>
+          <Grid item xs={12} sm={6} md={3}>
+            <Card>
+              <CardContent>
+                <Typography color="text.secondary" gutterBottom variant="body2">
+                  Paid Amount
+                </Typography>
+                <Typography variant="h4" color="success.main">
+                  {formatCurrency(stats.byPaymentStatus?.find(s => s._id === 'Paid')?.paidAmount || 0)}
+                </Typography>
+              </CardContent>
+            </Card>
           </Grid>
-          <Grid item xs={12} sm={2}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Payment</InputLabel>
-              <Select
-                value={filters.paymentStatus}
-                label="Payment"
-                onChange={(e) =>
-                  setFilters({ ...filters, paymentStatus: e.target.value })
-                }
-              >
-                <MenuItem value="">All</MenuItem>
-                <MenuItem value="Unpaid">Unpaid</MenuItem>
-                <MenuItem value="Partial">Partial</MenuItem>
-                <MenuItem value="Paid">Paid</MenuItem>
-                <MenuItem value="Overdue">Overdue</MenuItem>
-              </Select>
-            </FormControl>
-          </Grid>
-          <Grid item xs={12} sm={4}>
-            <TextField
-              fullWidth
-              size="small"
-              label="Search by invoice or school"
-              value={filters.search}
-              onChange={(e) =>
-                setFilters({ ...filters, search: e.target.value })
-              }
-            />
+          <Grid item xs={12} sm={6} md={3}>
+            <Card>
+              <CardContent>
+                <Typography color="text.secondary" gutterBottom variant="body2">
+                  Due Amount
+                </Typography>
+                <Typography variant="h4" color="error.main">
+                  {formatCurrency(
+                    (stats.byPaymentStatus?.find(s => s._id === 'Unpaid')?.totalAmount || 0) +
+                    (stats.byPaymentStatus?.find(s => s._id === 'Partial')?.totalAmount || 0)
+                  )}
+                </Typography>
+              </CardContent>
+            </Card>
           </Grid>
         </Grid>
-      </Paper>
+      )}
+
+      {/* Filters */}
+      {showFilters && (
+        <Paper sx={{ p: 2, mb: 3 }}>
+          <Grid container spacing={2} alignItems="center">
+            <Grid item xs={12} sm={2}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Month</InputLabel>
+                <Select
+                  value={filters.month}
+                  label="Month"
+                  onChange={(e) =>
+                    setFilters({ ...filters, month: e.target.value })
+                  }
+                >
+                  {Array.from({ length: 12 }, (_, i) => (
+                    <MenuItem key={i + 1} value={i + 1}>
+                      {new Date(2000, i, 1).toLocaleString("default", {
+                        month: "long",
+                      })}
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} sm={2}>
+              <TextField
+                fullWidth
+                size="small"
+                label="Year"
+                type="number"
+                value={filters.year}
+                onChange={(e) => setFilters({ ...filters, year: e.target.value })}
+              />
+            </Grid>
+            <Grid item xs={12} sm={2}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Status</InputLabel>
+                <Select
+                  value={filters.status}
+                  label="Status"
+                  onChange={(e) =>
+                    setFilters({ ...filters, status: e.target.value })
+                  }
+                >
+                  <MenuItem value="">All</MenuItem>
+                  <MenuItem value="Generated">Generated</MenuItem>
+                  <MenuItem value="Verified">Verified</MenuItem>
+                  <MenuItem value="Sent">Sent</MenuItem>
+                  <MenuItem value="Paid">Paid</MenuItem>
+                  <MenuItem value="Cancelled">Cancelled</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} sm={2}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Payment</InputLabel>
+                <Select
+                  value={filters.paymentStatus}
+                  label="Payment"
+                  onChange={(e) =>
+                    setFilters({ ...filters, paymentStatus: e.target.value })
+                  }
+                >
+                  <MenuItem value="">All</MenuItem>
+                  <MenuItem value="Unpaid">Unpaid</MenuItem>
+                  <MenuItem value="Partial">Partial</MenuItem>
+                  <MenuItem value="Paid">Paid</MenuItem>
+                  <MenuItem value="Overdue">Overdue</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} sm={4}>
+              <TextField
+                fullWidth
+                size="small"
+                label="Search by invoice or school"
+                value={filters.search}
+                onChange={(e) =>
+                  setFilters({ ...filters, search: e.target.value })
+                }
+              />
+            </Grid>
+          </Grid>
+        </Paper>
+      )}
 
       {/* Table */}
       <TableContainer component={Paper}>
@@ -329,6 +434,7 @@ const Invoices = () => {
               <TableCell align="right">Amount</TableCell>
               <TableCell>Status</TableCell>
               <TableCell>Payment</TableCell>
+              <TableCell>Due</TableCell>
               <TableCell>Generated</TableCell>
               <TableCell align="center">Actions</TableCell>
             </TableRow>
@@ -336,124 +442,151 @@ const Invoices = () => {
           <TableBody>
             {loading ? (
               <TableRow>
-                <TableCell colSpan={9} align="center" sx={{ py: 3 }}>
+                <TableCell colSpan={10} align="center" sx={{ py: 3 }}>
                   <CircularProgress />
                 </TableCell>
               </TableRow>
             ) : invoices.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} align="center" sx={{ py: 3 }}>
+                <TableCell colSpan={10} align="center" sx={{ py: 3 }}>
                   <Alert severity="info">No invoices found</Alert>
                 </TableCell>
               </TableRow>
             ) : (
-              invoices.map((invoice) => (
-                <TableRow key={invoice._id} hover>
-                  <TableCell padding="checkbox">
-                    <Checkbox
-                      checked={selectedInvoices.includes(invoice._id)}
-                      onChange={() => handleSelectOne(invoice._id)}
-                      disabled={invoice.status !== "Verified"}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Typography variant="body2" fontWeight="bold">
-                      {invoice.invoiceNumber}
-                    </Typography>
-                  </TableCell>
-                  <TableCell>{invoice.school?.name}</TableCell>
-                  <TableCell>
-                    {invoice.month}/{invoice.year}
-                  </TableCell>
-                  <TableCell align="right" fontWeight="bold">
-                    {formatCurrency(invoice.grandTotal)}
-                  </TableCell>
-                  <TableCell>
-                    <Chip
-                      label={invoice.status}
-                      size="small"
-                      color={statusColors[invoice.status] || "default"}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <Chip
-                      label={invoice.paymentStatus}
-                      size="small"
-                      color={
-                        paymentStatusColors[invoice.paymentStatus] || "default"
-                      }
-                    />
-                  </TableCell>
-                  <TableCell>
-                    {format(new Date(invoice.generatedAt), "dd/MM/yyyy")}
-                  </TableCell>
-                  <TableCell align="center">
-                    <Box
-                      sx={{
-                        display: "flex",
-                        gap: 0.5,
-                        justifyContent: "center",
-                      }}
-                    >
-                      <Tooltip title="View">
-                        <IconButton
-                          size="small"
-                          color="primary"
-                          onClick={() => navigate(`/invoices/${invoice._id}`)}
-                        >
-                          <Visibility fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-
-                      {invoice.status === "Generated" && (
-                        <Tooltip title="Verify">
+              invoices.map((invoice) => {
+                const due = invoice.grandTotal - (invoice.paidAmount || 0);
+                return (
+                  <TableRow key={invoice._id} hover>
+                    <TableCell padding="checkbox">
+                      <Checkbox
+                        checked={selectedInvoices.includes(invoice._id)}
+                        onChange={() => handleSelectOne(invoice._id)}
+                        disabled={invoice.status !== "Verified"}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" fontWeight="bold">
+                        {invoice.invoiceNumber}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2">
+                        {invoice.school?.name}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {invoice.school?.city}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      {invoice.month}/{invoice.year}
+                    </TableCell>
+                    <TableCell align="right">
+                      <Typography variant="body2" fontWeight="bold">
+                        {formatCurrency(invoice.grandTotal)}
+                      </Typography>
+                      {invoice.previousDue > 0 && (
+                        <Typography variant="caption" color="warning.main" display="block">
+                          (includes prev due: {formatCurrency(invoice.previousDue)})
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={invoice.status}
+                        size="small"
+                        color={statusColors[invoice.status] || "default"}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <Chip
+                        label={invoice.paymentStatus}
+                        size="small"
+                        color={paymentStatusColors[invoice.paymentStatus] || "default"}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      {due > 0 ? (
+                        <Typography variant="body2" color="error.main" fontWeight="bold">
+                          {formatCurrency(due)}
+                        </Typography>
+                      ) : (
+                        <Typography variant="body2" color="success.main">
+                          ₹0
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {format(new Date(invoice.generatedAt), "dd/MM/yyyy")}
+                    </TableCell>
+                    <TableCell align="center">
+                      <Box
+                        sx={{
+                          display: "flex",
+                          gap: 0.5,
+                          justifyContent: "center",
+                        }}
+                      >
+                        <Tooltip title="View">
                           <IconButton
                             size="small"
-                            color="success"
-                            onClick={() =>
-                              navigate(`/invoices/${invoice._id}/verify`)
-                            }
+                            color="primary"
+                            onClick={() => navigate(`/invoices/${invoice._id}`)}
                           >
-                            <CheckCircle fontSize="small" />
+                            <Visibility fontSize="small" />
                           </IconButton>
                         </Tooltip>
-                      )}
 
-                      {invoice.status === "Sent" &&
-                        invoice.paymentStatus !== "Paid" && (
-                          <Tooltip title="Record Payment">
+                        {invoice.status === "Generated" && (
+                          <Tooltip title="Verify">
                             <IconButton
                               size="small"
-                              color="warning"
+                              color="success"
                               onClick={() =>
-                                navigate(`/invoices/${invoice._id}/payment`)
+                                navigate(`/invoices/${invoice._id}/verify`)
                               }
                             >
-                              <Payment fontSize="small" />
+                              <CheckCircle fontSize="small" />
                             </IconButton>
                           </Tooltip>
                         )}
 
-                      <Tooltip title="Download PDF">
-                        <IconButton
-                          size="small"
-                          color="info"
-                          onClick={() =>
-                            handleDownload(invoice._id, invoice.invoiceNumber)
-                          }
-                        >
-                          <GetApp fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                    </Box>
-                  </TableCell>
-                </TableRow>
-              ))
+                        {(invoice.status === "Verified" || invoice.status === "Sent") &&
+                          invoice.paymentStatus !== "Paid" && (
+                            <Tooltip title="Record Payment">
+                              <IconButton
+                                size="small"
+                                color="warning"
+                                onClick={() =>
+                                  navigate(`/invoices/${invoice._id}/payment`)
+                                }
+                              >
+                                <Payment fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                          )}
+
+                        <Tooltip title="Download PDF">
+                          <IconButton
+                            size="small"
+                            color="info"
+                            onClick={() =>
+                              handleDownload(invoice._id, invoice.invoiceNumber)
+                            }
+                          >
+                            <GetApp fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </Box>
+                    </TableCell>
+                  </TableRow>
+                );
+              })
             )}
           </TableBody>
         </Table>
       </TableContainer>
 
+      {/* Pagination */}
       <TablePagination
         component="div"
         count={total}
@@ -464,7 +597,46 @@ const Invoices = () => {
           setRowsPerPage(parseInt(e.target.value, 10));
           setPage(0);
         }}
+        rowsPerPageOptions={[10, 25, 50, 100]}
       />
+
+      {/* Summary Footer */}
+      {invoices.length > 0 && (
+        <Paper sx={{ mt: 2, p: 2, bgcolor: 'grey.50' }}>
+          <Grid container spacing={2}>
+            <Grid item xs={12} sm={3}>
+              <Typography variant="body2" color="text.secondary">
+                Total Invoices:
+              </Typography>
+              <Typography variant="h6">{invoices.length}</Typography>
+            </Grid>
+            <Grid item xs={12} sm={3}>
+              <Typography variant="body2" color="text.secondary">
+                Total Amount:
+              </Typography>
+              <Typography variant="h6" color="primary.main">
+                {formatCurrency(getTotalAmount())}
+              </Typography>
+            </Grid>
+            <Grid item xs={12} sm={3}>
+              <Typography variant="body2" color="text.secondary">
+                Total Paid:
+              </Typography>
+              <Typography variant="h6" color="success.main">
+                {formatCurrency(getTotalAmount() - getTotalDue())}
+              </Typography>
+            </Grid>
+            <Grid item xs={12} sm={3}>
+              <Typography variant="body2" color="text.secondary">
+                Total Due:
+              </Typography>
+              <Typography variant="h6" color="error.main">
+                {formatCurrency(getTotalDue())}
+              </Typography>
+            </Grid>
+          </Grid>
+        </Paper>
+      )}
     </Box>
   );
 };
