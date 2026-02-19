@@ -63,33 +63,35 @@ const invoiceItemSchema = new mongoose.Schema({
   },
 });
 
-
-const paymentHistorySchema = new mongoose.Schema({
-  amount: {
-    type: Number,
-    required: true
+const paymentHistorySchema = new mongoose.Schema(
+  {
+    amount: {
+      type: Number,
+      required: true,
+    },
+    paymentDate: {
+      type: Date,
+      required: true,
+    },
+    paymentMethod: {
+      type: String,
+      enum: ["Cash", "Cheque", "Bank Transfer", "Online", "DD"],
+    },
+    referenceNumber: String,
+    bankName: String,
+    branch: String,
+    remarks: String,
+    receivedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    recordedAt: {
+      type: Date,
+      default: Date.now,
+    },
   },
-  paymentDate: {
-    type: Date,
-    required: true
-  },
-  paymentMethod: {
-    type: String,
-    enum: ['Cash', 'Cheque', 'Bank Transfer', 'Online', 'DD']
-  },
-  referenceNumber: String,
-  bankName: String,
-  branch: String,
-  remarks: String,
-  receivedBy: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User'
-  },
-  recordedAt: {
-    type: Date,
-    default: Date.now
-  }
-}, { _id: true });
+  { _id: true },
+);
 
 const invoiceSchema = new mongoose.Schema(
   {
@@ -167,6 +169,16 @@ const invoiceSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+
+    previousDueBreakdown: [
+      {
+        invoiceNumber: String,
+        month: Number,
+        year: Number,
+        generatedAt: Date,
+        dueAmount: Number,
+      },
+    ],
 
     // Status
     status: {
@@ -314,8 +326,10 @@ invoiceSchema.pre("validate", async function (next) {
     const year = this.year.toString().slice(-2);
     const month = this.month.toString().padStart(2, "0");
 
+    // ✅ FIX: Find last invoice for THIS SCHOOL and THIS month/year
     const lastInvoice = await this.constructor
       .findOne({
+        school: this.school, // 👈 School-specific
         month: this.month,
         year: this.year,
       })

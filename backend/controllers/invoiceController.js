@@ -14,7 +14,15 @@ import {
   deleteFromCloudinary,
 } from "../config/cloudinary.js";
 import { sendPaymentReceiptEmail } from "../utils/invoiceUtils.js";
-import { startOfMonth, endOfMonth, subMonths, getDaysInMonth, isWeekend, format, differenceInDays } from "date-fns";
+import {
+  startOfMonth,
+  endOfMonth,
+  subMonths,
+  getDaysInMonth,
+  isWeekend,
+  format,
+  differenceInDays,
+} from "date-fns";
 
 // @desc    Auto-generate invoices for previous month
 // @route   POST /api/invoices/auto-generate
@@ -26,60 +34,99 @@ export const autoGenerateInvoices = asyncHandler(async (req, res) => {
   try {
     const { manualMonth, manualYear } = req.body || {};
     let targetMonth, targetYear;
-    
+
     const currentDate = new Date();
     const today = currentDate.getDate();
-    const currentMonth = currentDate.getMonth() + 1; // 1-12
+    const currentMonth = currentDate.getMonth() + 1;
     const currentYear = currentDate.getFullYear();
 
     // ==================== VALIDATION ====================
-    
-    // CASE 1: Manual generation (Admin forcing generation for specific month)
+
     if (manualMonth && manualYear) {
-      // Manual mode can only generate previous month's invoice
-      const prevMonth = currentMonth === 1 ? 12 : currentMonth - 1;
-      const prevYear = currentMonth === 1 ? currentYear - 1 : currentYear;
-      
-      if (manualMonth !== prevMonth || manualYear !== prevYear) {
+      // CASE 1: MANUAL MODE - Only allow previous months, NOT current or future
+
+      // Convert to numbers to ensure proper comparison
+      const reqMonth = parseInt(manualMonth);
+      const reqYear = parseInt(manualYear);
+
+      // Create comparable numbers (YYYYMM format for easy comparison)
+      const requestedPeriod = reqYear * 100 + reqMonth;
+      const currentPeriod = currentYear * 100 + currentMonth;
+      const previousMonthDate = subMonths(currentDate, 1);
+      const previousMonth = previousMonthDate.getMonth() + 1;
+      const previousYear = previousMonthDate.getFullYear();
+      const previousPeriod = previousYear * 100 + previousMonth;
+
+      // Validation 1: No future months allowed
+      if (requestedPeriod > currentPeriod) {
         await session.abortTransaction();
         session.endSession();
         return res.status(400).json({
           success: false,
-          message: `You can only generate invoice for previous month: ${prevMonth}/${prevYear}`,
+          message: `Cannot generate invoice for future months. Current month: ${currentMonth}/${currentYear}`,
         });
       }
-      
-      targetMonth = manualMonth;
-      targetYear = manualYear;
-    }
-    
-    // CASE 2: Auto generation (Cron job - should only run on 1st)
-    else {
-      // Auto mode should only run on 1st of month
+
+      // Validation 2: No current month allowed in manual mode
+      if (requestedPeriod === currentPeriod) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(400).json({
+          success: false,
+          message: `Cannot generate invoice for current month (${currentMonth}/${currentYear}) in manual mode. Current month invoices are auto-generated on the 1st of next month.`,
+        });
+      }
+
+      // Validation 3: Don't allow generating invoices older than 12 months (optional business rule)
+      const twelveMonthsAgo = subMonths(currentDate, 12);
+      const twelveMonthsAgoPeriod =
+        twelveMonthsAgo.getFullYear() * 100 + (twelveMonthsAgo.getMonth() + 1);
+
+      if (requestedPeriod < twelveMonthsAgoPeriod) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(400).json({
+          success: false,
+          message: `Cannot generate invoice for dates older than 12 months.`,
+        });
+      }
+
+      targetMonth = reqMonth;
+      targetYear = reqYear;
+    } else {
+      // CASE 2: AUTO MODE - Only run on 1st of month for previous month
       if (today !== 1) {
         await session.abortTransaction();
         session.endSession();
         return res.status(400).json({
           success: false,
-          message: "Auto-generation only runs on 1st of month. Use manual mode for other dates.",
+          message:
+            "Auto-generation only runs on 1st of month. Use manual mode with month/year for other dates.",
         });
       }
-      
-      // Calculate previous month using date-fns (safer)
+
       const previousMonthDate = subMonths(currentDate, 1);
-      targetMonth = previousMonthDate.getMonth() + 1; // 1-12
+      targetMonth = previousMonthDate.getMonth() + 1;
       targetYear = previousMonthDate.getFullYear();
     }
 
-    console.log(`🚀 Generating invoices for: Month ${targetMonth}, Year ${targetYear}`);
+    // ==================== ADDITIONAL VALIDATION ====================
+    // Double-check we're never generating for current/future months
+    const targetPeriod = targetYear * 100 + targetMonth;
+    const currentPeriod = currentYear * 100 + currentMonth;
+
+    if (targetPeriod >= currentPeriod) {
+      await session.abortTransaction();
+      session.endSession();
+      return res.status(400).json({
+        success: false,
+        message: `System error: Attempted to generate invoice for current/future month (${targetMonth}/${targetYear}). This should not happen.`,
+      });
+    }
 
     // ==================== GET ACTIVE SCHOOLS ====================
-    
-    const schools = await School.find({ 
-      status: "active",
-      // Optional: Only schools with active trainers
-      // currentTrainers: { $exists: true, $ne: [] }
-    }).session(session);
+
+    const schools = await School.find({ status: "active" }).session(session);
 
     if (!schools.length) {
       await session.abortTransaction();
@@ -91,89 +138,87 @@ export const autoGenerateInvoices = asyncHandler(async (req, res) => {
       });
     }
 
-    // ==================== DATE RANGE FOR TARGET MONTH ====================
-    
+    // ==================== DATE RANGE ====================
+
     const startDate = startOfMonth(new Date(targetYear, targetMonth - 1, 1));
     const endDate = endOfMonth(startDate);
     const daysInMonth = getDaysInMonth(startDate);
-    
-    console.log(`📅 Date range: ${format(startDate, 'yyyy-MM-dd')} to ${format(endDate, 'yyyy-MM-dd')} (${daysInMonth} days)`);
 
-    // ==================== GET ALL HOLIDAYS FOR THE MONTH ====================
-    
+    // ==================== GET HOLIDAYS ====================
+
     const holidays = await Holiday.find({
-      date: { 
-        $gte: startDate, 
-        $lte: endDate 
-      },
+      date: { $gte: startDate, $lte: endDate },
     }).session(session);
 
     const holidaySet = new Set(
-      holidays.map(h => format(h.date, 'yyyy-MM-dd'))
+      holidays.map((h) => format(h.date, "yyyy-MM-dd")),
     );
-    
-    console.log(`🎉 Total holidays: ${holidaySet.size}`);
+
+    // ==================== CHECK FOR EXISTING INVOICES (Batch check) ====================
+    const existingInvoices = await Invoice.find({
+      month: targetMonth,
+      year: targetYear,
+      status: { $ne: "Cancelled" },
+    })
+      .session(session)
+      .distinct("school");
+
+    const existingSchoolIds = new Set(
+      existingInvoices.map((id) => id.toString()),
+    );
 
     // ==================== PROCESS EACH SCHOOL ====================
-    
+
     const generatedInvoices = [];
     const skippedSchools = [];
     const failedSchools = [];
 
     for (const school of schools) {
+      // Skip if invoice already exists for this period
+      if (existingSchoolIds.has(school._id.toString())) {
+        skippedSchools.push({
+          school: school.name,
+          reason: "Invoice already exists for this period",
+        });
+        continue;
+      }
+
+      // ✅ Start a new sub-transaction for each school
+      const schoolSession = await mongoose.startSession();
+      schoolSession.startTransaction();
+
       try {
-        // Check if invoice already exists for this school/month/year
-        const existingInvoice = await Invoice.findOne({
-          school: school._id,
-          month: targetMonth,
-          year: targetYear,
-          status: { $ne: "Cancelled" } // Don't regenerate if cancelled
-        }).session(session);
+        // ==================== GET EMPLOYEE POSTINGS ====================
 
-        if (existingInvoice) {
-          console.log(`⏭️ Invoice already exists for ${school.name}`);
-          skippedSchools.push({
-            school: school.name,
-            reason: "Invoice already exists"
-          });
-          continue;
-        }
-
-        // ==================== GET ACTIVE EMPLOYEE POSTINGS ====================
-        
         const postings = await EmployeePosting.find({
           school: school._id,
           isActive: true,
-          monthlyBillingSalary: { $gt: 0 }, // Only those with valid billing rate
+          monthlyBillingSalary: { $gt: 0 },
           $or: [
-            { 
+            {
               startDate: { $lte: endDate },
-              $or: [
-                { endDate: null },
-                { endDate: { $gte: startDate } }
-              ]
-            }
-          ]
+              $or: [{ endDate: null }, { endDate: { $gte: startDate } }],
+            },
+          ],
         })
-        .populate({
-          path: "employee",
-          select: "basicInfo.fullName basicInfo.employeeId basicInfo.designation",
-        })
-        .session(session);
+          .populate({
+            path: "employee",
+            select: "basicInfo.fullName basicInfo.employeeId",
+          })
+          .session(schoolSession);
 
         if (!postings.length) {
-          console.log(`⏭️ No active employees for ${school.name}`);
           skippedSchools.push({
             school: school.name,
-            reason: "No active employees"
+            reason: "No active employees",
           });
+          await schoolSession.commitTransaction();
+          schoolSession.endSession();
           continue;
         }
 
-        console.log(`👥 Processing ${school.name} - ${postings.length} employees`);
-
         // ==================== PROCESS EACH EMPLOYEE ====================
-        
+
         const items = [];
         let subtotal = 0;
         let totalTds = 0;
@@ -185,51 +230,43 @@ export const autoGenerateInvoices = asyncHandler(async (req, res) => {
             continue;
           }
 
-          // Calculate billable days for this employee in the month
-          const billableStart = new Date(Math.max(
-            posting.startDate.getTime(),
-            startDate.getTime()
-          ));
-          
-          const billableEnd = posting.endDate 
+          // Calculate billable days
+          const billableStart = new Date(
+            Math.max(posting.startDate.getTime(), startDate.getTime()),
+          );
+
+          const billableEnd = posting.endDate
             ? new Date(Math.min(posting.endDate.getTime(), endDate.getTime()))
             : endDate;
 
-          // If no overlap with month, skip
-          if (billableStart > billableEnd) {
-            continue;
-          }
+          if (billableStart > billableEnd) continue;
 
-          // Calculate total billable days (including weekends)
-          const totalBillableDays = differenceInDays(billableEnd, billableStart) + 1;
-          
+          const totalBillableDays =
+            differenceInDays(billableEnd, billableStart) + 1;
           if (totalBillableDays <= 0) continue;
 
-          // ==================== GET APPROVED LEAVES ====================
-          
+          // ==================== GET LEAVES ====================
+
           const leaves = await Leave.find({
             employee: posting.employee._id,
             status: "Approved",
-            $or: [
-              {
-                fromDate: { $lte: endDate },
-                toDate: { $gte: startDate }
-              }
-            ]
-          }).session(session);
+            $or: [{ fromDate: { $lte: endDate }, toDate: { $gte: startDate } }],
+          }).session(schoolSession);
 
-          // Calculate leave days (excluding holidays)
           const leaveDaysSet = new Set();
-          
+
           for (const leave of leaves) {
-            const leaveStart = new Date(Math.max(leave.fromDate, billableStart));
+            const leaveStart = new Date(
+              Math.max(leave.fromDate, billableStart),
+            );
             const leaveEnd = new Date(Math.min(leave.toDate, billableEnd));
-            
-            // Iterate through each day of leave
-            for (let d = new Date(leaveStart); d <= leaveEnd; d.setDate(d.getDate() + 1)) {
-              const dateStr = format(d, 'yyyy-MM-dd');
-              
-              // Don't count as leave if it's a holiday
+
+            for (
+              let d = new Date(leaveStart);
+              d <= leaveEnd;
+              d.setDate(d.getDate() + 1)
+            ) {
+              const dateStr = format(d, "yyyy-MM-dd");
               if (!holidaySet.has(dateStr)) {
                 leaveDaysSet.add(dateStr);
               }
@@ -237,20 +274,20 @@ export const autoGenerateInvoices = asyncHandler(async (req, res) => {
           }
 
           const leaveDays = leaveDaysSet.size;
-          
-          // Calculate working days (billable days - leaves)
-          // Note: Weekends are already included in billable days
           const actualWorkingDays = Math.max(0, totalBillableDays - leaveDays);
-          
+
           // Calculate prorated amount
           const dailyRate = posting.monthlyBillingSalary / daysInMonth;
           const proratedAmount = Math.round(dailyRate * actualWorkingDays);
 
-          // Calculate TDS and GST (school level rates)
-          const tdsAmount = Math.round((proratedAmount * (school.tdsPercent || 0)) / 100);
-          const gstAmount = Math.round((proratedAmount * (school.gstPercent || 0)) / 100);
+          // Calculate TDS and GST
+          const tdsAmount = Math.round(
+            (proratedAmount * (school.tdsPercent || 0)) / 100,
+          );
+          const gstAmount = Math.round(
+            (proratedAmount * (school.gstPercent || 0)) / 100,
+          );
 
-          // Create item
           const item = {
             employee: posting.employee._id,
             employeeName: posting.employee.basicInfo?.fullName || "Unknown",
@@ -269,46 +306,58 @@ export const autoGenerateInvoices = asyncHandler(async (req, res) => {
           };
 
           items.push(item);
-          
+
           subtotal += proratedAmount;
           totalTds += tdsAmount;
           totalGst += gstAmount;
         }
 
-        // If no valid items after processing, skip
         if (!items.length) {
-          console.log(`⏭️ No valid invoice items for ${school.name}`);
           skippedSchools.push({
             school: school.name,
-            reason: "No valid invoice items"
+            reason: "No valid invoice items",
           });
+          await schoolSession.commitTransaction();
+          schoolSession.endSession();
           continue;
         }
 
-        // ==================== CHECK FOR PREVIOUS DUE ====================
-        
-        const previousDueInvoice = await Invoice.findOne({
+        // ==================== CHECK PREVIOUS DUE (ALL PREVIOUS MONTHS) ====================
+
+        const unpaidInvoices = await Invoice.find({
           school: school._id,
           paymentStatus: { $in: ["Unpaid", "Partial"] },
-          grandTotal: { $gt: 0 }
-        })
-        .sort({ createdAt: -1 })
-        .session(session);
+          $or: [
+            { year: { $lt: targetYear } },
+            { year: targetYear, month: { $lt: targetMonth } },
+          ],
+        }).session(schoolSession);
 
         let previousDue = 0;
-        if (previousDueInvoice) {
-          previousDue = Math.max(
-            0,
-            previousDueInvoice.grandTotal - (previousDueInvoice.paidAmount || 0)
-          );
+        let previousDueBreakdown = [];
+
+        for (const inv of unpaidInvoices) {
+          const dueAmount = Math.max(0, inv.grandTotal - (inv.paidAmount || 0));
+
+          if (dueAmount > 0) {
+            previousDue += dueAmount;
+
+            previousDueBreakdown.push({
+              invoiceNumber: inv.invoiceNumber,
+              month: inv.month,
+              year: inv.year,
+              generatedAt: inv.generatedAt,
+              dueAmount,
+            });
+          }
         }
 
         // ==================== CALCULATE GRAND TOTAL ====================
-        
+
         const grandTotal = subtotal - totalTds + totalGst + previousDue;
 
         // ==================== CREATE INVOICE ====================
-        
+
         const invoiceData = {
           school: school._id,
           schoolDetails: {
@@ -323,61 +372,78 @@ export const autoGenerateInvoices = asyncHandler(async (req, res) => {
           year: targetYear,
           items,
           subtotal,
-          previousDue, // Add this to schema if not exists
+          previousDue,
+          previousDueBreakdown,
           tdsPercent: school.tdsPercent || 0,
           tdsAmount: totalTds,
           gstPercent: school.gstPercent || 0,
           gstAmount: totalGst,
           grandTotal,
           status: "Generated",
-          paymentStatus: previousDue > 0 ? "Partial" : "Unpaid",
+          paymentStatus: "Unpaid",
           generatedBy: req.user?._id || null,
           generatedAt: new Date(),
           createdBy: req.user?._id || null,
         };
 
-        const invoice = await Invoice.create([invoiceData], { session });
+        const invoice = await Invoice.create([invoiceData], {
+          session: schoolSession,
+        });
 
         // ==================== UPDATE LEDGER ====================
-        
-        await SchoolLedger.create([{
-          school: school._id,
-          invoice: invoice[0]._id,
-          transactionType: "Invoice Generated",
-          amount: grandTotal,
-          balance: grandTotal,
-          month: targetMonth,
-          year: targetYear,
-          description: `Invoice generated for ${targetMonth}/${targetYear}`,
-          createdBy: req.user?._id || null,
-          date: new Date(),
-        }], { session });
+
+        await SchoolLedger.create(
+          [
+            {
+              school: school._id,
+              invoice: invoice[0]._id,
+              transactionType: "Invoice Generated",
+              amount: grandTotal,
+              balance: grandTotal,
+              month: targetMonth,
+              year: targetYear,
+              description: `Invoice generated for ${targetMonth}/${targetYear}`,
+              createdBy: req.user?._id || null,
+              date: new Date(),
+            },
+          ],
+          { session: schoolSession },
+        );
+
+        // Commit school transaction
+        await schoolSession.commitTransaction();
+        schoolSession.endSession();
 
         generatedInvoices.push(invoice[0]);
-        console.log(`✅ Invoice generated for ${school.name}: ${invoice[0].invoiceNumber} - ₹${grandTotal}`);
-
       } catch (schoolError) {
-        console.error(`❌ Error processing school ${school.name}:`, schoolError);
+        // Rollback school transaction on error
+        await schoolSession.abortTransaction();
+        schoolSession.endSession();
+
         failedSchools.push({
           school: school.name,
-          error: schoolError.message
+          error: schoolError.message,
         });
-        // Continue with next school, don't break the loop
       }
     }
 
-    // ==================== COMMIT TRANSACTION ====================
-    
+    // ==================== COMMIT MAIN TRANSACTION ====================
+
     await session.commitTransaction();
     session.endSession();
 
     // ==================== SEND RESPONSE ====================
-    
+
+    const totalAmount = generatedInvoices.reduce(
+      (sum, inv) => sum + inv.grandTotal,
+      0,
+    );
+
     const response = {
       success: true,
-      message: `Invoice generation completed`,
+      message: `Invoice generation completed for ${targetMonth}/${targetYear}`,
       data: {
-        generated: generatedInvoices.map(inv => ({
+        generated: generatedInvoices.map((inv) => ({
           id: inv._id,
           invoiceNumber: inv.invoiceNumber,
           school: inv.schoolDetails.name,
@@ -389,30 +455,23 @@ export const autoGenerateInvoices = asyncHandler(async (req, res) => {
           total: generatedInvoices.length,
           skipped: skippedSchools.length,
           failed: failedSchools.length,
+          month: targetMonth,
+          year: targetYear,
+          totalAmount: totalAmount,
         },
         skipped: skippedSchools,
         failed: failedSchools,
       },
     };
 
-    // Log summary
-    console.log("\n========== INVOICE GENERATION SUMMARY ==========");
-    console.log(`✅ Generated: ${generatedInvoices.length} invoices`);
-    console.log(`⏭️ Skipped: ${skippedSchools.length} schools`);
-    console.log(`❌ Failed: ${failedSchools.length} schools`);
-    console.log(`💰 Total Amount: ₹${generatedInvoices.reduce((sum, inv) => sum + inv.grandTotal, 0)}`);
-    console.log("================================================\n");
-
     res.status(201).json(response);
-
   } catch (error) {
-    // ==================== ROLLBACK ON ERROR ====================
-    
-    await session.abortTransaction();
+    // Rollback main transaction
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
     session.endSession();
-    
-    console.error("❌ Invoice generation failed:", error);
-    
+
     res.status(500).json({
       success: false,
       message: "Invoice generation failed",
@@ -628,7 +687,6 @@ export const getInvoice = asyncHandler(async (req, res) => {
 //   });
 // });
 
-
 // @desc    Verify invoice (Admin can customize before verify)
 // @route   PUT /api/invoices/:id/verify
 // @access  Private/Admin
@@ -653,7 +711,7 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
 
   // 🟢 IMPROVED: Allow re-verification with proper checks
   const allowedStatuses = ["Generated", "Verified"]; // ✅ Now Verified is also allowed
-  
+
   if (!allowedStatuses.includes(invoice.status)) {
     return res.status(400).json({
       success: false,
@@ -665,7 +723,8 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
   if (invoice.status === "Verified" && !forceReVerify) {
     return res.status(400).json({
       success: false,
-      message: "Invoice is already verified. Use forceReVerify=true to modify and re-verify",
+      message:
+        "Invoice is already verified. Use forceReVerify=true to modify and re-verify",
     });
   }
 
@@ -680,12 +739,14 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
   // Apply TDS customizations
   if (tdsPercent !== undefined && tdsPercent !== invoice.tdsPercent) {
     changes.push(`TDS changed from ${originalTdsPercent}% to ${tdsPercent}%`);
-    
+
     // If there was a previous adjustment, update it instead of creating new
     if (invoice.customizations.tdsAdjustment && invoice.status === "Verified") {
-      invoice.customizations.tdsAdjustment.previousPercent = invoice.customizations.tdsAdjustment.adjustedPercent;
+      invoice.customizations.tdsAdjustment.previousPercent =
+        invoice.customizations.tdsAdjustment.adjustedPercent;
       invoice.customizations.tdsAdjustment.adjustedPercent = tdsPercent;
-      invoice.customizations.tdsAdjustment.reason = "Admin re-adjusted TDS during re-verification";
+      invoice.customizations.tdsAdjustment.reason =
+        "Admin re-adjusted TDS during re-verification";
       invoice.customizations.tdsAdjustment.adjustedBy = req.user._id;
       invoice.customizations.tdsAdjustment.adjustedAt = new Date();
     } else {
@@ -703,11 +764,13 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
   // Apply GST customizations
   if (gstPercent !== undefined && gstPercent !== invoice.gstPercent) {
     changes.push(`GST changed from ${originalGstPercent}% to ${gstPercent}%`);
-    
+
     if (invoice.customizations.gstAdjustment && invoice.status === "Verified") {
-      invoice.customizations.gstAdjustment.previousPercent = invoice.customizations.gstAdjustment.adjustedPercent;
+      invoice.customizations.gstAdjustment.previousPercent =
+        invoice.customizations.gstAdjustment.adjustedPercent;
       invoice.customizations.gstAdjustment.adjustedPercent = gstPercent;
-      invoice.customizations.gstAdjustment.reason = "Admin re-adjusted GST during re-verification";
+      invoice.customizations.gstAdjustment.reason =
+        "Admin re-adjusted GST during re-verification";
       invoice.customizations.gstAdjustment.adjustedBy = req.user._id;
       invoice.customizations.gstAdjustment.adjustedAt = new Date();
     } else {
@@ -730,13 +793,19 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
       const originalItem = originalItems[index];
 
       if (originalItem && modifiedItem.leaveDays !== originalItem.leaveDays) {
-        changes.push(`Leave days for ${originalItem.employeeName} changed from ${originalItem.leaveDays} to ${modifiedItem.leaveDays}`);
-        
+        changes.push(
+          `Leave days for ${originalItem.employeeName} changed from ${originalItem.leaveDays} to ${modifiedItem.leaveDays}`,
+        );
+
         leaveAdjustmentsList.push({
           employee: originalItem.employee,
           originalLeaveDays: originalItem.leaveDays,
           adjustedLeaveDays: modifiedItem.leaveDays,
-          reason: modifiedItem.reason || (invoice.status === "Verified" ? "Admin re-adjusted leave days" : "Admin adjusted leave days"),
+          reason:
+            modifiedItem.reason ||
+            (invoice.status === "Verified"
+              ? "Admin re-adjusted leave days"
+              : "Admin adjusted leave days"),
           adjustedBy: req.user._id,
           adjustedAt: new Date(),
         });
@@ -744,13 +813,13 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
         // ✅ FIXED: Calculate correctly based on working days
         const daysInMonth = new Date(invoice.year, invoice.month, 0).getDate();
         const workingDays = originalItem.workingDays || daysInMonth;
-        
+
         // Daily rate based on actual working days in month
         const dailyRate = originalItem.monthlyBillingSalary / workingDays;
 
         const leaveDeduction = dailyRate * modifiedItem.leaveDays;
         const actualWorkingDays = workingDays - modifiedItem.leaveDays;
-        
+
         // ✅ CORRECT: prorated amount = monthly salary for working days - leave deduction
         // OR: daily rate × actual working days
         const proratedAmount = dailyRate * actualWorkingDays;
@@ -773,22 +842,28 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
   if (!invoice.verificationHistory) {
     invoice.verificationHistory = [];
   }
-  
+
   invoice.verificationHistory.push({
     verifiedBy: req.user._id,
     verifiedAt: new Date(),
     status: invoice.status === "Verified" ? "Re-verified" : "Verified",
     changes: changes.length > 0 ? changes : ["No changes made"],
-    notes: notes || (invoice.status === "Verified" ? "Re-verified invoice" : "Initial verification"),
+    notes:
+      notes ||
+      (invoice.status === "Verified"
+        ? "Re-verified invoice"
+        : "Initial verification"),
   });
 
   // Update invoice
   invoice.status = "Verified";
   invoice.verifiedBy = req.user._id;
   invoice.verifiedAt = new Date();
-  invoice.notes = notes ? 
-    (invoice.notes ? `${invoice.notes}\n\n[${new Date().toLocaleDateString()}] Re-verification: ${notes}` : notes) : 
-    invoice.notes;
+  invoice.notes = notes
+    ? invoice.notes
+      ? `${invoice.notes}\n\n[${new Date().toLocaleDateString()}] Re-verification: ${notes}`
+      : notes
+    : invoice.notes;
   invoice.updatedBy = req.user._id;
 
   await invoice.save();
@@ -799,9 +874,10 @@ export const verifyInvoice = asyncHandler(async (req, res) => {
     { path: "verificationHistory.verifiedBy", select: "name email" },
   ]);
 
-  const message = invoice.verificationHistory.length > 1 
-    ? "Invoice re-verified successfully" 
-    : "Invoice verified successfully";
+  const message =
+    invoice.verificationHistory.length > 1
+      ? "Invoice re-verified successfully"
+      : "Invoice verified successfully";
 
   res.json({
     success: true,
@@ -821,7 +897,7 @@ export const resendInvoice = asyncHandler(async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
 
-  const invoice = await Invoice.findById(id).populate('school');
+  const invoice = await Invoice.findById(id).populate("school");
 
   if (!invoice) {
     return res.status(404).json({
@@ -831,7 +907,7 @@ export const resendInvoice = asyncHandler(async (req, res) => {
   }
 
   // ✅ Allow resend for Sent and Verified invoices
-  if (!['Sent', 'Verified'].includes(invoice.status)) {
+  if (!["Sent", "Verified"].includes(invoice.status)) {
     return res.status(400).json({
       success: false,
       message: `Invoice cannot be resent. Current status: ${invoice.status}. Allowed: Sent, Verified`,
@@ -860,7 +936,7 @@ export const resendInvoice = asyncHandler(async (req, res) => {
         public_id: `invoice_${invoice.invoiceNumber}_${Date.now()}`,
         resource_type: "raw",
       });
-      
+
       pdfUrl = uploadResult.secure_url;
       pdfPublicId = uploadResult.public_id;
     }
@@ -870,7 +946,7 @@ export const resendInvoice = asyncHandler(async (req, res) => {
       invoice.schoolDetails?.email || invoice.school?.email,
       invoice,
       pdfResult.buffer,
-      { isResend: true } // Flag for email template
+      { isResend: true }, // Flag for email template
     );
 
     if (emailSent) {
@@ -878,7 +954,7 @@ export const resendInvoice = asyncHandler(async (req, res) => {
       invoice.status = "Sent";
       invoice.sentAt = new Date();
       invoice.sentBy = req.user._id;
-      
+
       // Update PDF if new one was generated
       if (pdfUrl) {
         invoice.pdfUrl = pdfUrl;
@@ -889,7 +965,7 @@ export const resendInvoice = asyncHandler(async (req, res) => {
       if (!invoice.resendHistory) {
         invoice.resendHistory = [];
       }
-      
+
       invoice.resendHistory.push({
         resentBy: req.user._id,
         resentAt: new Date(),
@@ -937,7 +1013,7 @@ export const sendInvoicesBulk = asyncHandler(async (req, res) => {
   // ✅ Allow sending both Verified and Sent invoices
   const invoices = await Invoice.find({
     _id: { $in: invoiceIds },
-    status: { $in: ['Verified', 'Sent'] } // Allow both
+    status: { $in: ["Verified", "Sent"] }, // Allow both
   }).populate("school");
 
   if (invoices.length === 0) {
@@ -967,12 +1043,12 @@ export const sendInvoicesBulk = asyncHandler(async (req, res) => {
         invoice.schoolDetails?.email || invoice.school?.email,
         invoice,
         pdfResult.buffer,
-        { isResend: invoice.status === 'Sent' } // Flag for resend
+        { isResend: invoice.status === "Sent" }, // Flag for resend
       );
 
       if (emailSent) {
         const oldStatus = invoice.status;
-        
+
         invoice.status = "Sent";
         invoice.sentAt = new Date();
         invoice.sentBy = req.user._id;
@@ -980,7 +1056,7 @@ export const sendInvoicesBulk = asyncHandler(async (req, res) => {
         invoice.pdfPublicId = uploadResult.public_id;
 
         // Track resend if it was already sent
-        if (oldStatus === 'Sent') {
+        if (oldStatus === "Sent") {
           if (!invoice.resendHistory) {
             invoice.resendHistory = [];
           }
@@ -1139,7 +1215,7 @@ export const recordPayment = asyncHandler(async (req, res) => {
   if (!invoice.paymentHistory) {
     invoice.paymentHistory = [];
   }
-  
+
   invoice.paymentHistory.push({
     amount: Number(amount),
     paymentDate: paymentDate || new Date(),
@@ -1149,12 +1225,13 @@ export const recordPayment = asyncHandler(async (req, res) => {
     branch,
     remarks,
     receivedBy: req.user._id,
-    recordedAt: new Date()
+    recordedAt: new Date(),
   });
 
   // Update invoice
   invoice.paidAmount = newPaidAmount;
-  invoice.paymentStatus = newPaidAmount === invoice.grandTotal ? "Paid" : "Partial";
+  invoice.paymentStatus =
+    newPaidAmount === invoice.grandTotal ? "Paid" : "Partial";
   invoice.paidAt = new Date();
   invoice.updatedBy = req.user._id;
 

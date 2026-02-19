@@ -1,4 +1,4 @@
-// pages/Invoices/InvoiceView.jsx - TOP PAR YEH LIKHO
+// pages/Invoices/InvoiceView.jsx
 import React, { useState, useEffect } from "react";
 import {
   Box,
@@ -26,7 +26,7 @@ import {
   DialogContent,
   DialogActions,
   AlertTitle,
-  TextField, // 👈 YEH IMPORT KARO (Resend reason ke liye)
+  TextField,
 } from "@mui/material";
 import {
   ArrowBack,
@@ -39,9 +39,11 @@ import {
   History,
   Send,
   Cancel,
-  Refresh, // 👈 YEH BHI ADD KARO (resend icon ke liye)
+  AccountBalance,
+  Receipt as ReceiptIcon,
+  Money,
 } from "@mui/icons-material";
-import { useParams, useNavigate, useLocation } from "react-router-dom"; // 👈 useLocation ADD KARO
+import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { format } from "date-fns";
 import toast from "react-hot-toast";
 import invoiceService from "../../services/invoiceService";
@@ -62,29 +64,36 @@ const paymentStatusColors = {
   Overdue: "error",
 };
 
+// Helper function for payment icons
+const getPaymentIcon = (method) => {
+  switch(method?.toLowerCase()) {
+    case 'cash': return <Money fontSize="small" />;
+    case 'cheque': return <ReceiptIcon fontSize="small" />;
+    case 'bank transfer': return <AccountBalance fontSize="small" />;
+    case 'online': return <Payment fontSize="small" />;
+    default: return <Payment fontSize="small" />;
+  }
+};
+
 const InvoiceView = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const location = useLocation(); // 👈 YEH ADD KARO
+  const location = useLocation();
   const [invoice, setInvoice] = useState(null);
   const [loading, setLoading] = useState(true);
-
-  // 👇 YEH TINO STATE VARIABLES ADD KARO
   const [reVerifyDialog, setReVerifyDialog] = useState(false);
   const [cancelDialog, setCancelDialog] = useState(false);
   const [resendDialog, setResendDialog] = useState(false);
-  const [resendReason, setResendReason] = useState(""); // 👈 Resend reason ke liye
-  const [sending, setSending] = useState(false); // 👈 Sending status ke liye
+  const [resendReason, setResendReason] = useState("");
+  const [sending, setSending] = useState(false);
 
   useEffect(() => {
     fetchInvoice();
   }, [id]);
 
-  // Check if we came from verify page with success
   useEffect(() => {
     if (location.state?.verifySuccess) {
       toast.success(location.state.message || "Invoice verified successfully");
-      // Clear the state
       window.history.replaceState({}, document.title);
     }
   }, [location]);
@@ -125,8 +134,16 @@ const InvoiceView = () => {
       },
     });
   };
-  // 👇 YEH NAYA FUNCTION ADD KARO (RESEND KE LIYE)
+
   const handleResend = async () => {
+    // Check if email exists
+    const schoolEmail = invoice?.schoolDetails?.email || invoice?.school?.email;
+    if (!schoolEmail) {
+      toast.error("School email not found. Cannot send invoice.");
+      setResendDialog(false);
+      return;
+    }
+
     try {
       setSending(true);
 
@@ -136,23 +153,21 @@ const InvoiceView = () => {
           (invoice.status === "Verified"
             ? "First time sending"
             : "Resending to school"),
-        regeneratePDF: true, // Naya PDF generate karo
+        regeneratePDF: true,
       };
 
       let response;
 
       if (invoice.status === "Verified") {
-        // Pehli baar send kar rahe hain to sendBulk use karo
         response = await invoiceService.sendBulk([id], resendData.reason);
       } else {
-        // Already sent hai to resend API call karo
         response = await invoiceService.resendInvoice(id, resendData);
       }
 
       toast.success(response.data.message || "Invoice sent successfully");
       setResendDialog(false);
       setResendReason("");
-      fetchInvoice(); // Refresh karo
+      fetchInvoice();
     } catch (error) {
       console.error("Send error:", error);
       toast.error(
@@ -192,13 +207,11 @@ const InvoiceView = () => {
     return new Date(invoice.year, invoice.month, 0).getDate();
   };
 
-  // 👇 YEH SARE HELPER FUNCTIONS ADD KARO
   const canVerify = () => {
     return invoice?.status === "Generated";
   };
 
   const canReVerify = () => {
-    // Verified ya Sent dono ko re-verify kar sakte hain
     return ["Verified", "Sent"].includes(invoice?.status);
   };
 
@@ -237,14 +250,7 @@ const InvoiceView = () => {
     <Box sx={{ p: 3 }}>
       {/* Header */}
       <Box sx={{ display: "flex", justifyContent: "space-between", mb: 3 }}>
-        <Box
-          sx={{
-            display: "flex",
-            alignItems: "center",
-            gap: 2,
-            flexWrap: "wrap",
-          }}
-        >
+        <Box sx={{ display: "flex", alignItems: "center", gap: 2, flexWrap: "wrap" }}>
           <IconButton onClick={() => navigate("/invoices")}>
             <ArrowBack />
           </IconButton>
@@ -260,11 +266,8 @@ const InvoiceView = () => {
             size="small"
           />
 
-          {/* Show verification count */}
           {invoice.verificationHistory?.length > 0 && (
-            <Tooltip
-              title={`Verified ${invoice.verificationHistory.length} time(s)`}
-            >
+            <Tooltip title={`Verified ${invoice.verificationHistory.length} time(s)`}>
               <Chip
                 icon={<History />}
                 label={`v${invoice.verificationHistory.length}`}
@@ -273,12 +276,21 @@ const InvoiceView = () => {
               />
             </Tooltip>
           )}
+
+          {invoice.resendHistory?.length > 0 && (
+            <Tooltip title={`Resent ${invoice.resendHistory.length} time(s)`}>
+              <Chip
+                icon={<Send />}
+                label={`r${invoice.resendHistory.length}`}
+                size="small"
+                variant="outlined"
+                color="info"
+              />
+            </Tooltip>
+          )}
         </Box>
 
         <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-          {/* Show appropriate action buttons based on status */}
-
-          {/* 1. For Generated invoices - Show Verify */}
           {invoice.status === "Generated" && (
             <Button
               variant="contained"
@@ -290,7 +302,6 @@ const InvoiceView = () => {
             </Button>
           )}
 
-          {/* 2. For Verified invoices - Show Send & Re-verify */}
           {invoice.status === "Verified" && (
             <>
               <Button
@@ -305,18 +316,13 @@ const InvoiceView = () => {
                 variant="outlined"
                 color="warning"
                 startIcon={<Edit />}
-                onClick={() =>
-                  navigate(`/invoices/${id}/verify`, {
-                    state: { isReVerify: true },
-                  })
-                }
+                onClick={handleReVerify}
               >
                 Re-verify
               </Button>
             </>
           )}
 
-          {/* 3. For Sent invoices - Show Resend & Re-verify (with warning) */}
           {invoice.status === "Sent" && (
             <>
               <Button
@@ -334,27 +340,24 @@ const InvoiceView = () => {
                   startIcon={<Edit />}
                   onClick={() => setReVerifyDialog(true)}
                 >
-                  Re-verify (Sent)
+                  Re-verify
                 </Button>
               </Tooltip>
+              {invoice.paymentStatus !== "Paid" && (
+                <Button
+                  variant="contained"
+                  color="warning"
+                  startIcon={<Payment />}
+                  onClick={() => navigate(`/invoices/${id}/payment`)}
+                >
+                  {invoice.paymentStatus === "Partial"
+                    ? "Add Remaining Payment"
+                    : "Record Payment"}
+                </Button>
+              )}
             </>
           )}
 
-          {/* 4. For Sent invoices with due payment - Show Record Payment */}
-          {invoice.status === "Sent" && invoice.paymentStatus !== "Paid" && (
-            <Button
-              variant="contained"
-              color="warning"
-              startIcon={<Payment />}
-              onClick={() => navigate(`/invoices/${id}/payment`)}
-            >
-              {invoice.paymentStatus === "Partial"
-                ? "Add Remaining Payment"
-                : "Record Payment"}
-            </Button>
-          )}
-
-          {/* 5. Cancel button (always show if cancellable) */}
           {canCancel() && (
             <Button
               variant="outlined"
@@ -366,7 +369,6 @@ const InvoiceView = () => {
             </Button>
           )}
 
-          {/* 6. Download button (always show) */}
           <Button
             variant="outlined"
             startIcon={<GetApp />}
@@ -401,7 +403,6 @@ const InvoiceView = () => {
             <Typography variant="body1" gutterBottom>
               {invoice.school?.name}
             </Typography>
-
             <Typography variant="subtitle2" color="text.secondary">
               Address
             </Typography>
@@ -416,7 +417,6 @@ const InvoiceView = () => {
             <Typography variant="body1" gutterBottom>
               {invoice.schoolDetails?.contactPersonName}
             </Typography>
-
             <Typography variant="subtitle2" color="text.secondary">
               Email / Mobile
             </Typography>
@@ -434,8 +434,7 @@ const InvoiceView = () => {
           {daysInMonth} total days in month)
           {invoice.sentAt && (
             <>
-              {" "}
-              • <strong>Sent on:</strong>{" "}
+              {" "}• <strong>Sent on:</strong>{" "}
               {format(new Date(invoice.sentAt), "dd/MM/yyyy HH:mm")}
             </>
           )}
@@ -478,11 +477,7 @@ const InvoiceView = () => {
                     <TableCell>{item.employeeId}</TableCell>
                     <TableCell align="right">
                       {formatCurrency(item.monthlyBillingSalary)}
-                      <Typography
-                        variant="caption"
-                        display="block"
-                        color="text.secondary"
-                      >
+                      <Typography variant="caption" display="block" color="text.secondary">
                         for {item.workingDays} working days
                       </Typography>
                     </TableCell>
@@ -504,14 +499,9 @@ const InvoiceView = () => {
                       </Typography>
                     </TableCell>
                     <TableCell align="center">
-                      {item.actualWorkingDays ||
-                        item.workingDays - item.leaveDays}
+                      {item.actualWorkingDays || item.workingDays - item.leaveDays}
                       /{item.workingDays}
-                      <Typography
-                        variant="caption"
-                        display="block"
-                        color="text.secondary"
-                      >
+                      <Typography variant="caption" display="block" color="text.secondary">
                         of {daysInMonth} total
                       </Typography>
                     </TableCell>
@@ -542,7 +532,7 @@ const InvoiceView = () => {
         </Box>
       </Paper>
 
-      {/* Summary */}
+      {/* Summary Grid */}
       <Grid container spacing={3}>
         {/* Step-by-Step Calculation */}
         <Grid item xs={12}>
@@ -551,188 +541,75 @@ const InvoiceView = () => {
               <Typography variant="h6" gutterBottom>
                 📊 Invoice Calculation Breakdown
               </Typography>
-              <Typography variant="body2" color="text.secondary" paragraph>
-                Here's how your invoice total was calculated, step by step:
-              </Typography>
-
               <Box sx={{ mt: 3 }}>
                 {/* Step 1: Subtotal */}
-                <Paper
-                  variant="outlined"
-                  sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}
-                >
+                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}>
                   <Grid container alignItems="center" spacing={2}>
                     <Grid item xs={12} sm={1}>
-                      <Avatar
-                        sx={{
-                          bgcolor: "primary.main",
-                          width: 28,
-                          height: 28,
-                          fontSize: "0.875rem",
-                        }}
-                      >
-                        1
-                      </Avatar>
+                      <Avatar sx={{ bgcolor: "primary.main", width: 28, height: 28, fontSize: "0.875rem" }}>1</Avatar>
                     </Grid>
                     <Grid item xs={12} sm={5}>
-                      <Typography variant="subtitle1" fontWeight="medium">
-                        Calculate Subtotal
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        Sum of all employee prorated amounts
-                      </Typography>
+                      <Typography variant="subtitle1" fontWeight="medium">Calculate Subtotal</Typography>
                     </Grid>
                     <Grid item xs={12} sm={6}>
-                      <Box
-                        sx={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                        }}
-                      >
-                        <Typography variant="body2">
-                          Total of all items:
-                        </Typography>
-                        <Typography variant="h6" color="primary">
-                          {formatCurrency(invoice.subtotal)}
-                        </Typography>
+                      <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                        <Typography variant="body2">Total of all items:</Typography>
+                        <Typography variant="h6" color="primary">{formatCurrency(invoice.subtotal)}</Typography>
                       </Box>
                     </Grid>
                   </Grid>
                 </Paper>
 
-                {/* Step 2: Apply TDS */}
-                <Paper
-                  variant="outlined"
-                  sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}
-                >
+                {/* Step 2: TDS */}
+                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}>
                   <Grid container alignItems="center" spacing={2}>
                     <Grid item xs={12} sm={1}>
-                      <Avatar
-                        sx={{
-                          bgcolor: "primary.main",
-                          width: 28,
-                          height: 28,
-                          fontSize: "0.875rem",
-                        }}
-                      >
-                        2
-                      </Avatar>
+                      <Avatar sx={{ bgcolor: "primary.main", width: 28, height: 28, fontSize: "0.875rem" }}>2</Avatar>
                     </Grid>
                     <Grid item xs={12} sm={5}>
-                      <Typography variant="subtitle1" fontWeight="medium">
-                        Apply TDS (Tax Deducted at Source)
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        TDS is calculated on the subtotal amount
-                      </Typography>
+                      <Typography variant="subtitle1" fontWeight="medium">Apply TDS</Typography>
                     </Grid>
                     <Grid item xs={12} sm={6}>
-                      <Box
-                        sx={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                        }}
-                      >
-                        <Typography variant="body2">
-                          {invoice.tdsPercent}% of{" "}
-                          {formatCurrency(invoice.subtotal)}:
-                        </Typography>
-                        <Typography variant="h6" color="error">
-                          - {formatCurrency(invoice.tdsAmount)}
-                        </Typography>
+                      <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                        <Typography variant="body2">{invoice.tdsPercent}% of {formatCurrency(invoice.subtotal)}:</Typography>
+                        <Typography variant="h6" color="error">- {formatCurrency(invoice.tdsAmount)}</Typography>
                       </Box>
                     </Grid>
                   </Grid>
                 </Paper>
 
-                {/* Step 3: Add GST */}
-                <Paper
-                  variant="outlined"
-                  sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}
-                >
+                {/* Step 3: GST */}
+                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}>
                   <Grid container alignItems="center" spacing={2}>
                     <Grid item xs={12} sm={1}>
-                      <Avatar
-                        sx={{
-                          bgcolor: "primary.main",
-                          width: 28,
-                          height: 28,
-                          fontSize: "0.875rem",
-                        }}
-                      >
-                        3
-                      </Avatar>
+                      <Avatar sx={{ bgcolor: "primary.main", width: 28, height: 28, fontSize: "0.875rem" }}>3</Avatar>
                     </Grid>
                     <Grid item xs={12} sm={5}>
-                      <Typography variant="subtitle1" fontWeight="medium">
-                        Add GST (Goods & Services Tax)
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        GST is applied after TDS deduction
-                      </Typography>
+                      <Typography variant="subtitle1" fontWeight="medium">Add GST</Typography>
                     </Grid>
                     <Grid item xs={12} sm={6}>
-                      <Box
-                        sx={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                        }}
-                      >
-                        <Typography variant="body2">
-                          {invoice.gstPercent}% of (Subtotal - TDS):
-                        </Typography>
-                        <Typography variant="h6" color="success.main">
-                          + {formatCurrency(invoice.gstAmount)}
-                        </Typography>
+                      <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                        <Typography variant="body2">{invoice.gstPercent}% of (Subtotal - TDS):</Typography>
+                        <Typography variant="h6" color="success.main">+ {formatCurrency(invoice.gstAmount)}</Typography>
                       </Box>
                     </Grid>
                   </Grid>
                 </Paper>
 
-                {/* Step 4: Previous Due (if any) */}
+                {/* Step 4: Previous Due */}
                 {invoice.previousDue > 0 && (
-                  <Paper
-                    variant="outlined"
-                    sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}
-                  >
+                  <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}>
                     <Grid container alignItems="center" spacing={2}>
                       <Grid item xs={12} sm={1}>
-                        <Avatar
-                          sx={{
-                            bgcolor: "warning.main",
-                            width: 28,
-                            height: 28,
-                            fontSize: "0.875rem",
-                          }}
-                        >
-                          4
-                        </Avatar>
+                        <Avatar sx={{ bgcolor: "warning.main", width: 28, height: 28, fontSize: "0.875rem" }}>4</Avatar>
                       </Grid>
                       <Grid item xs={12} sm={5}>
-                        <Typography variant="subtitle1" fontWeight="medium">
-                          Add Previous Due
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary">
-                          Outstanding amount from previous invoices
-                        </Typography>
+                        <Typography variant="subtitle1" fontWeight="medium">Add Previous Due</Typography>
                       </Grid>
                       <Grid item xs={12} sm={6}>
-                        <Box
-                          sx={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                          }}
-                        >
-                          <Typography variant="body2">
-                            Previous due amount:
-                          </Typography>
-                          <Typography variant="h6" color="warning.main">
-                            + {formatCurrency(invoice.previousDue)}
-                          </Typography>
+                        <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                          <Typography variant="body2">Previous due amount:</Typography>
+                          <Typography variant="h6" color="warning.main">+ {formatCurrency(invoice.previousDue)}</Typography>
                         </Box>
                       </Grid>
                     </Grid>
@@ -740,55 +617,19 @@ const InvoiceView = () => {
                 )}
 
                 {/* Step 5: Round Off */}
-                <Paper
-                  variant="outlined"
-                  sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}
-                >
+                <Paper variant="outlined" sx={{ p: 2, mb: 2, bgcolor: "grey.50" }}>
                   <Grid container alignItems="center" spacing={2}>
                     <Grid item xs={12} sm={1}>
-                      <Avatar
-                        sx={{
-                          bgcolor:
-                            invoice.roundOff >= 0
-                              ? "success.main"
-                              : "error.main",
-                          width: 28,
-                          height: 28,
-                          fontSize: "0.875rem",
-                        }}
-                      >
-                        5
-                      </Avatar>
+                      <Avatar sx={{ bgcolor: invoice.roundOff >= 0 ? "success.main" : "error.main", width: 28, height: 28, fontSize: "0.875rem" }}>5</Avatar>
                     </Grid>
                     <Grid item xs={12} sm={5}>
-                      <Typography variant="subtitle1" fontWeight="medium">
-                        Round Off Adjustment
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        Round to nearest whole number
-                      </Typography>
+                      <Typography variant="subtitle1" fontWeight="medium">Round Off Adjustment</Typography>
                     </Grid>
                     <Grid item xs={12} sm={6}>
-                      <Box
-                        sx={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                        }}
-                      >
-                        <Typography variant="body2">
-                          Round off adjustment:
-                        </Typography>
-                        <Typography
-                          variant="h6"
-                          color={
-                            invoice.roundOff >= 0
-                              ? "success.main"
-                              : "error.main"
-                          }
-                        >
-                          {invoice.roundOff >= 0 ? "+" : ""}
-                          {formatCurrency(invoice.roundOff)}
+                      <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                        <Typography variant="body2">Round off adjustment:</Typography>
+                        <Typography variant="h6" color={invoice.roundOff >= 0 ? "success.main" : "error.main"}>
+                          {invoice.roundOff >= 0 ? "+" : ""}{formatCurrency(invoice.roundOff)}
                         </Typography>
                       </Box>
                     </Grid>
@@ -796,74 +637,19 @@ const InvoiceView = () => {
                 </Paper>
 
                 {/* Final Total */}
-                <Paper
-                  variant="outlined"
-                  sx={{
-                    p: 2,
-                    bgcolor: "primary.light",
-                    border: "2px solid",
-                    borderColor: "primary.main",
-                  }}
-                >
+                <Paper variant="outlined" sx={{ p: 2, bgcolor: "primary.light", border: "2px solid", borderColor: "primary.main" }}>
                   <Grid container alignItems="center" spacing={2}>
                     <Grid item xs={12} sm={1}>
-                      <Avatar
-                        sx={{
-                          bgcolor: "success.main",
-                          width: 28,
-                          height: 28,
-                          fontSize: "0.875rem",
-                        }}
-                      >
-                        ✓
-                      </Avatar>
+                      <Avatar sx={{ bgcolor: "success.main", width: 28, height: 28, fontSize: "0.875rem" }}>✓</Avatar>
                     </Grid>
                     <Grid item xs={12} sm={5}>
-                      <Typography
-                        variant="h6"
-                        fontWeight="bold"
-                        color="primary.dark"
-                      >
-                        Final Amount
-                      </Typography>
-                      <Typography variant="body2" color="primary.dark">
-                        Total invoice amount after all calculations
-                      </Typography>
+                      <Typography variant="h6" fontWeight="bold" color="primary.dark">Final Amount</Typography>
                     </Grid>
                     <Grid item xs={12} sm={6}>
-                      <Box
-                        sx={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          alignItems: "center",
-                        }}
-                      >
-                        <Typography
-                          variant="h5"
-                          fontWeight="bold"
-                          color="primary.dark"
-                        >
-                          GRAND TOTAL:
-                        </Typography>
-                        <Typography
-                          variant="h4"
-                          fontWeight="bold"
-                          color="primary.dark"
-                        >
+                      <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                        <Typography variant="h5" fontWeight="bold" color="primary.dark">GRAND TOTAL:</Typography>
+                        <Typography variant="h4" fontWeight="bold" color="primary.dark">
                           {formatCurrency(invoice.grandTotal)}
-                        </Typography>
-                      </Box>
-                      <Box
-                        sx={{
-                          mt: 1,
-                          display: "flex",
-                          justifyContent: "flex-end",
-                        }}
-                      >
-                        <Typography variant="caption" color="primary.dark">
-                          = Subtotal - TDS + GST{" "}
-                          {invoice.previousDue > 0 ? "+ Previous Due" : ""} ±
-                          Round Off
                         </Typography>
                       </Box>
                     </Grid>
@@ -874,7 +660,7 @@ const InvoiceView = () => {
           </Card>
         </Grid>
 
-        {/* Payment Details - UPDATED VERSION */}
+        {/* Payment Details */}
         <Grid item xs={12} md={6}>
           <Card>
             <CardContent>
@@ -884,47 +670,20 @@ const InvoiceView = () => {
 
               {/* Payment Progress Bar */}
               <Box sx={{ mb: 3 }}>
-                <Box
-                  sx={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    mb: 1,
-                  }}
-                >
-                  <Typography variant="body2" color="text.secondary">
-                    Payment Progress
-                  </Typography>
+                <Box sx={{ display: "flex", justifyContent: "space-between", mb: 1 }}>
+                  <Typography variant="body2" color="text.secondary">Payment Progress</Typography>
                   <Typography variant="body2" fontWeight="bold">
-                    {invoice.paidAmount
-                      ? Math.round(
-                          (invoice.paidAmount / invoice.grandTotal) * 100,
-                        )
-                      : 0}
-                    %
+                    {invoice.paidAmount ? Math.round((invoice.paidAmount / invoice.grandTotal) * 100) : 0}%
                   </Typography>
                 </Box>
-                <Box
-                  sx={{
-                    width: "100%",
-                    height: 8,
-                    bgcolor: "grey.200",
-                    borderRadius: 4,
-                    overflow: "hidden",
-                  }}
-                >
-                  <Box
-                    sx={{
-                      width: `${invoice.paidAmount ? (invoice.paidAmount / invoice.grandTotal) * 100 : 0}%`,
-                      height: "100%",
-                      bgcolor:
-                        invoice.paymentStatus === "Paid"
-                          ? "success.main"
-                          : invoice.paymentStatus === "Partial"
-                            ? "warning.main"
-                            : "error.main",
-                      transition: "width 0.3s",
-                    }}
-                  />
+                <Box sx={{ width: "100%", height: 8, bgcolor: "grey.200", borderRadius: 4, overflow: "hidden" }}>
+                  <Box sx={{
+                    width: `${invoice.paidAmount ? (invoice.paidAmount / invoice.grandTotal) * 100 : 0}%`,
+                    height: "100%",
+                    bgcolor: invoice.paymentStatus === "Paid" ? "success.main" : 
+                            invoice.paymentStatus === "Partial" ? "warning.main" : "error.main",
+                    transition: "width 0.3s",
+                  }} />
                 </Box>
               </Box>
 
@@ -932,83 +691,39 @@ const InvoiceView = () => {
 
               {/* Payment Summary */}
               <Grid container spacing={2}>
-                {/* Status Chip */}
                 <Grid item xs={12}>
-                  <Box
-                    sx={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
-                  >
-                    <Typography variant="body2" color="text.secondary">
-                      Payment Status:
-                    </Typography>
-                    <Chip
-                      label={invoice.paymentStatus}
-                      size="small"
-                      color={paymentStatusColors[invoice.paymentStatus]}
-                      sx={{ fontWeight: "bold" }}
-                    />
+                  <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                    <Typography variant="body2" color="text.secondary">Payment Status:</Typography>
+                    <Chip label={invoice.paymentStatus} size="small" color={paymentStatusColors[invoice.paymentStatus]} />
                   </Box>
                 </Grid>
-
-                {/* Invoice Total */}
                 <Grid item xs={6}>
-                  <Typography variant="body2" color="text.secondary">
-                    Invoice Total:
-                  </Typography>
+                  <Typography variant="body2" color="text.secondary">Invoice Total:</Typography>
                 </Grid>
                 <Grid item xs={6}>
-                  <Typography variant="body2" align="right" fontWeight="bold">
-                    {formatCurrency(invoice.grandTotal)}
-                  </Typography>
-                </Grid>
-
-                {/* Paid Amount */}
-                <Grid item xs={6}>
-                  <Typography variant="body2" color="text.secondary">
-                    Paid Amount:
-                  </Typography>
+                  <Typography variant="body2" align="right" fontWeight="bold">{formatCurrency(invoice.grandTotal)}</Typography>
                 </Grid>
                 <Grid item xs={6}>
-                  <Typography
-                    variant="body2"
-                    align="right"
-                    color="success.main"
-                    fontWeight="bold"
-                  >
+                  <Typography variant="body2" color="text.secondary">Paid Amount:</Typography>
+                </Grid>
+                <Grid item xs={6}>
+                  <Typography variant="body2" align="right" color="success.main" fontWeight="bold">
                     {formatCurrency(invoice.paidAmount || 0)}
                   </Typography>
                 </Grid>
-
-                {/* Due Amount */}
                 <Grid item xs={6}>
-                  <Typography variant="body2" color="text.secondary">
-                    Due Amount:
-                  </Typography>
+                  <Typography variant="body2" color="text.secondary">Due Amount:</Typography>
                 </Grid>
                 <Grid item xs={6}>
-                  <Typography
-                    variant="body2"
-                    align="right"
-                    color="error"
-                    fontWeight="bold"
-                  >
+                  <Typography variant="body2" align="right" color="error" fontWeight="bold">
                     {formatCurrency(dueAmount)}
                   </Typography>
                 </Grid>
-
-                {/* Last Payment Date (if any) */}
                 {invoice.paidAt && (
                   <>
-                    <Grid item xs={12}>
-                      <Divider sx={{ my: 1 }} />
-                    </Grid>
+                    <Grid item xs={12}><Divider sx={{ my: 1 }} /></Grid>
                     <Grid item xs={6}>
-                      <Typography variant="body2" color="text.secondary">
-                        Last Payment:
-                      </Typography>
+                      <Typography variant="body2" color="text.secondary">Last Payment:</Typography>
                     </Grid>
                     <Grid item xs={6}>
                       <Typography variant="body2" align="right">
@@ -1019,81 +734,112 @@ const InvoiceView = () => {
                 )}
               </Grid>
 
-              {/* Payment History Section ke andar - after TableContainer */}
-              {invoice.paymentHistory?.length === 0 && (
-                <Box
-                  sx={{
-                    textAlign: "center",
-                    py: 3,
-                    bgcolor: "grey.50",
-                    borderRadius: 1,
-                  }}
-                >
-                  <Typography variant="body2" color="text.secondary">
-                    No payment history available
-                  </Typography>
+              {/* Payment History */}
+              {invoice.paymentHistory && invoice.paymentHistory.length > 0 && (
+                <Box sx={{ mt: 3 }}>
+                  <Typography variant="subtitle2" gutterBottom>Payment History</Typography>
+                  <TableContainer component={Paper} variant="outlined">
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow sx={{ bgcolor: "grey.50" }}>
+                          <TableCell>Date</TableCell>
+                          <TableCell align="right">Amount</TableCell>
+                          <TableCell>Method</TableCell>
+                          <TableCell>Reference</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {invoice.paymentHistory.map((payment, idx) => (
+                          <TableRow key={idx}>
+                            <TableCell>
+                              {format(new Date(payment.paymentDate || payment.recordedAt || payment.date), "dd/MM/yyyy")}
+                            </TableCell>
+                            <TableCell align="right" fontWeight="bold">
+                              {formatCurrency(payment.amount)}
+                            </TableCell>
+                            <TableCell>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                {getPaymentIcon(payment.paymentMethod || payment.method)}
+                                {payment.paymentMethod || payment.method}
+                              </Box>
+                            </TableCell>
+                            <TableCell>
+                              <Tooltip title={payment.referenceNumber || payment.reference || "No reference"}>
+                                <span style={{ fontFamily: 'monospace' }}>
+                                  {(payment.referenceNumber || payment.reference)
+                                    ? (payment.referenceNumber || payment.reference).substring(0, 8) + "..."
+                                    : "-"}
+                                </span>
+                              </Tooltip>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+
+                  {/* Total Paid Summary */}
+                  <Box sx={{ mt: 2, p: 1.5, bgcolor: 'success.light', borderRadius: 1 }}>
+                    <Grid container spacing={1}>
+                      <Grid item xs={8}>
+                        <Typography variant="body2" color="success.contrastText">Total Payments Received:</Typography>
+                      </Grid>
+                      <Grid item xs={4}>
+                        <Typography variant="body2" align="right" fontWeight="bold" color="success.contrastText">
+                          {formatCurrency(invoice.paidAmount || 0)}
+                        </Typography>
+                      </Grid>
+                      <Grid item xs={8}>
+                        <Typography variant="body2" color="success.contrastText">Number of Payments:</Typography>
+                      </Grid>
+                      <Grid item xs={4}>
+                        <Typography variant="body2" align="right" fontWeight="bold" color="success.contrastText">
+                          {invoice.paymentHistory.length}
+                        </Typography>
+                      </Grid>
+                    </Grid>
+                  </Box>
                 </Box>
               )}
 
-              {/* Payment History - Line ~780 ke around */}
-              <TableBody>
-                {invoice.paymentHistory.map((payment, idx) => (
-                  <TableRow key={idx}>
-                    <TableCell>
-                      {/* 👇 YEH CHANGE KARO - payment.date ki jagah payment.paymentDate ya payment.recordedAt */}
-                      {format(
-                        new Date(
-                          payment.paymentDate ||
-                            payment.recordedAt ||
-                            payment.date,
-                        ),
-                        "dd/MM/yyyy",
-                      )}
-                    </TableCell>
-                    <TableCell align="right" fontWeight="bold">
-                      {formatCurrency(payment.amount)}
-                    </TableCell>
-                    <TableCell>
-                      {payment.paymentMethod || payment.method}
-                    </TableCell>
-                    <TableCell>
-                      <Tooltip
-                        title={
-                          payment.referenceNumber ||
-                          payment.reference ||
-                          "No reference"
-                        }
-                      >
-                        <span>
-                          {payment.referenceNumber || payment.reference
-                            ? (
-                                payment.referenceNumber || payment.reference
-                              ).substring(0, 8) + "..."
-                            : "-"}
-                        </span>
-                      </Tooltip>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
+              {(!invoice.paymentHistory || invoice.paymentHistory.length === 0) && (
+                <Box sx={{ mt: 2, textAlign: 'center', py: 3, bgcolor: 'grey.50', borderRadius: 1 }}>
+                  <Typography variant="body2" color="text.secondary">No payment history available</Typography>
+                </Box>
+              )}
+
+              {/* Quick Action Buttons */}
+              {dueAmount > 0 && (
+                <Box sx={{ mt: 2, display: 'flex', gap: 1 }}>
+                  <Button
+                    fullWidth
+                    variant="contained"
+                    color="warning"
+                    size="small"
+                    startIcon={<Payment />}
+                    onClick={() => navigate(`/invoices/${id}/payment`)}
+                  >
+                    Record Full Payment
+                  </Button>
+                  <Button
+                    fullWidth
+                    variant="outlined"
+                    color="warning"
+                    size="small"
+                    onClick={() => navigate(`/invoices/${id}/payment`)}
+                  >
+                    Partial
+                  </Button>
+                </Box>
+              )}
 
               {/* Payment Instructions */}
               <Box sx={{ mt: 2, p: 2, bgcolor: "info.light", borderRadius: 1 }}>
-                <Typography
-                  variant="caption"
-                  color="info.contrastText"
-                  display="block"
-                >
-                  💡 <strong>Note:</strong> Payment can be made via Cash,
-                  Cheque, or Bank Transfer.
+                <Typography variant="caption" color="info.contrastText" display="block">
+                  💡 <strong>Note:</strong> Payment can be made via Cash, Cheque, or Bank Transfer.
                 </Typography>
                 {dueAmount > 0 && (
-                  <Typography
-                    variant="caption"
-                    color="info.contrastText"
-                    display="block"
-                    sx={{ mt: 0.5 }}
-                  >
+                  <Typography variant="caption" color="info.contrastText" display="block" sx={{ mt: 0.5 }}>
                     Due amount of {formatCurrency(dueAmount)} is pending.
                   </Typography>
                 )}
@@ -1102,7 +848,7 @@ const InvoiceView = () => {
           </Card>
         </Grid>
 
-        {/* Tax Details - Already there but ensure it's complete */}
+        {/* Tax Details */}
         <Grid item xs={12} md={6}>
           <Card>
             <CardContent>
@@ -1110,115 +856,55 @@ const InvoiceView = () => {
                 📋 Tax Details
               </Typography>
 
-              {/* Tax Summary */}
               <Grid container spacing={2}>
-                {/* TDS */}
                 <Grid item xs={6}>
-                  <Typography variant="body2" color="text.secondary">
-                    TDS Rate:
-                  </Typography>
+                  <Typography variant="body2" color="text.secondary">TDS Rate:</Typography>
                 </Grid>
                 <Grid item xs={6}>
-                  <Typography variant="body2" align="right" fontWeight="bold">
-                    {invoice.tdsPercent}%
-                  </Typography>
-                </Grid>
-
-                <Grid item xs={6}>
-                  <Typography variant="body2" color="text.secondary">
-                    TDS Amount:
-                  </Typography>
+                  <Typography variant="body2" align="right" fontWeight="bold">{invoice.tdsPercent}%</Typography>
                 </Grid>
                 <Grid item xs={6}>
-                  <Typography
-                    variant="body2"
-                    align="right"
-                    color="error"
-                    fontWeight="bold"
-                  >
+                  <Typography variant="body2" color="text.secondary">TDS Amount:</Typography>
+                </Grid>
+                <Grid item xs={6}>
+                  <Typography variant="body2" align="right" color="error" fontWeight="bold">
                     - {formatCurrency(invoice.tdsAmount)}
                   </Typography>
                 </Grid>
-
-                {/* GST */}
                 <Grid item xs={6}>
-                  <Typography variant="body2" color="text.secondary">
-                    GST Rate:
-                  </Typography>
+                  <Typography variant="body2" color="text.secondary">GST Rate:</Typography>
                 </Grid>
                 <Grid item xs={6}>
-                  <Typography variant="body2" align="right" fontWeight="bold">
-                    {invoice.gstPercent}%
-                  </Typography>
-                </Grid>
-
-                <Grid item xs={6}>
-                  <Typography variant="body2" color="text.secondary">
-                    GST Amount:
-                  </Typography>
+                  <Typography variant="body2" align="right" fontWeight="bold">{invoice.gstPercent}%</Typography>
                 </Grid>
                 <Grid item xs={6}>
-                  <Typography
-                    variant="body2"
-                    align="right"
-                    color="success.main"
-                    fontWeight="bold"
-                  >
+                  <Typography variant="body2" color="text.secondary">GST Amount:</Typography>
+                </Grid>
+                <Grid item xs={6}>
+                  <Typography variant="body2" align="right" color="success.main" fontWeight="bold">
                     + {formatCurrency(invoice.gstAmount)}
                   </Typography>
                 </Grid>
-
                 <Grid item xs={12}>
                   <Divider sx={{ my: 1 }} />
                 </Grid>
-
-                {/* Net Tax Effect */}
                 <Grid item xs={6}>
-                  <Typography
-                    variant="body2"
-                    color="text.secondary"
-                    fontWeight="bold"
-                  >
-                    Net Tax Effect:
-                  </Typography>
+                  <Typography variant="body2" color="text.secondary" fontWeight="bold">Net Tax Effect:</Typography>
                 </Grid>
                 <Grid item xs={6}>
-                  <Typography
-                    variant="body2"
-                    align="right"
-                    fontWeight="bold"
-                    color={
-                      invoice.gstAmount - invoice.tdsAmount >= 0
-                        ? "success.main"
-                        : "error.main"
-                    }
-                  >
+                  <Typography variant="body2" align="right" fontWeight="bold" 
+                    color={invoice.gstAmount - invoice.tdsAmount >= 0 ? "success.main" : "error.main"}>
                     {invoice.gstAmount - invoice.tdsAmount >= 0 ? "+" : ""}
                     {formatCurrency(invoice.gstAmount - invoice.tdsAmount)}
                   </Typography>
                 </Grid>
-
-                {/* Tax Calculation Note */}
                 <Grid item xs={12}>
-                  <Box
-                    sx={{ mt: 2, p: 1.5, bgcolor: "grey.50", borderRadius: 1 }}
-                  >
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      display="block"
-                    >
-                      <strong>Calculation:</strong> Subtotal (
-                      {formatCurrency(invoice.subtotal)})
-                      {invoice.tdsPercent > 0
-                        ? ` - TDS ${invoice.tdsPercent}% (${formatCurrency(invoice.tdsAmount)})`
-                        : ""}
-                      {invoice.gstPercent > 0
-                        ? ` + GST ${invoice.gstPercent}% (${formatCurrency(invoice.gstAmount)})`
-                        : ""}
-                      {invoice.previousDue > 0
-                        ? ` + Previous Due (${formatCurrency(invoice.previousDue)})`
-                        : ""}
+                  <Box sx={{ mt: 2, p: 1.5, bgcolor: "grey.50", borderRadius: 1 }}>
+                    <Typography variant="caption" color="text.secondary" display="block">
+                      <strong>Calculation:</strong> Subtotal ({formatCurrency(invoice.subtotal)})
+                      {invoice.tdsPercent > 0 ? ` - TDS ${invoice.tdsPercent}% (${formatCurrency(invoice.tdsAmount)})` : ""}
+                      {invoice.gstPercent > 0 ? ` + GST ${invoice.gstPercent}% (${formatCurrency(invoice.gstAmount)})` : ""}
+                      {invoice.previousDue > 0 ? ` + Previous Due (${formatCurrency(invoice.previousDue)})` : ""}
                     </Typography>
                   </Box>
                 </Grid>
@@ -1232,9 +918,7 @@ const InvoiceView = () => {
           <Grid item xs={12}>
             <Card>
               <CardContent>
-                <Typography variant="h6" gutterBottom color="warning.main">
-                  🔧 Customizations Applied
-                </Typography>
+                <Typography variant="h6" gutterBottom color="warning.main">🔧 Customizations Applied</Typography>
                 <TableContainer>
                   <Table size="small">
                     <TableHead>
@@ -1248,26 +932,16 @@ const InvoiceView = () => {
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {invoice.customizations.leaveAdjustments.map(
-                        (adj, index) => (
-                          <TableRow key={index}>
-                            <TableCell>
-                              {adj.employee?.basicInfo?.fullName ||
-                                adj.employeeName ||
-                                "N/A"}
-                            </TableCell>
-                            <TableCell>{adj.originalLeaveDays}</TableCell>
-                            <TableCell>{adj.adjustedLeaveDays}</TableCell>
-                            <TableCell>{adj.reason}</TableCell>
-                            <TableCell>
-                              {adj.adjustedBy?.name || "Admin"}
-                            </TableCell>
-                            <TableCell>
-                              {format(new Date(adj.adjustedAt), "dd/MM/yyyy")}
-                            </TableCell>
-                          </TableRow>
-                        ),
-                      )}
+                      {invoice.customizations.leaveAdjustments.map((adj, index) => (
+                        <TableRow key={index}>
+                          <TableCell>{adj.employee?.basicInfo?.fullName || adj.employeeName || "N/A"}</TableCell>
+                          <TableCell>{adj.originalLeaveDays}</TableCell>
+                          <TableCell>{adj.adjustedLeaveDays}</TableCell>
+                          <TableCell>{adj.reason}</TableCell>
+                          <TableCell>{adj.adjustedBy?.name || "Admin"}</TableCell>
+                          <TableCell>{format(new Date(adj.adjustedAt), "dd/MM/yyyy")}</TableCell>
+                        </TableRow>
+                      ))}
                     </TableBody>
                   </Table>
                 </TableContainer>
@@ -1281,9 +955,7 @@ const InvoiceView = () => {
           <Grid item xs={12}>
             <Card>
               <CardContent>
-                <Typography variant="h6" gutterBottom>
-                  📜 Verification History
-                </Typography>
+                <Typography variant="h6" gutterBottom>📜 Verification History</Typography>
                 <TableContainer>
                   <Table size="small">
                     <TableHead>
@@ -1298,46 +970,22 @@ const InvoiceView = () => {
                     <TableBody>
                       {invoice.verificationHistory.map((history, index) => (
                         <TableRow key={index}>
+                          <TableCell>{format(new Date(history.verifiedAt), "dd/MM/yyyy HH:mm")}</TableCell>
                           <TableCell>
-                            {format(
-                              new Date(history.verifiedAt),
-                              "dd/MM/yyyy HH:mm",
-                            )}
+                            <Chip label={history.status} size="small" 
+                              color={history.status === "Re-verified" ? "secondary" : "success"} />
                           </TableCell>
-                          <TableCell>
-                            <Chip
-                              label={history.status}
-                              size="small"
-                              color={
-                                history.status === "Re-verified"
-                                  ? "secondary"
-                                  : "success"
-                              }
-                            />
-                          </TableCell>
-                          <TableCell>
-                            {history.verifiedBy?.name || "System"}
-                          </TableCell>
+                          <TableCell>{history.verifiedBy?.name || "System"}</TableCell>
                           <TableCell>
                             {history.changes?.length > 0 ? (
                               <ul style={{ margin: 0, paddingLeft: 16 }}>
                                 {history.changes.map((change, idx) => (
-                                  <li key={idx}>
-                                    <Typography variant="caption">
-                                      {change}
-                                    </Typography>
-                                  </li>
+                                  <li key={idx}><Typography variant="caption">{change}</Typography></li>
                                 ))}
                               </ul>
-                            ) : (
-                              "No changes"
-                            )}
+                            ) : "No changes"}
                           </TableCell>
-                          <TableCell>
-                            <Typography variant="caption">
-                              {history.notes || "-"}
-                            </Typography>
-                          </TableCell>
+                          <TableCell><Typography variant="caption">{history.notes || "-"}</Typography></TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -1348,13 +996,12 @@ const InvoiceView = () => {
           </Grid>
         )}
 
+        {/* Resend History */}
         {invoice.resendHistory?.length > 0 && (
           <Grid item xs={12}>
             <Card>
               <CardContent>
-                <Typography variant="h6" gutterBottom>
-                  📤 Resend History
-                </Typography>
+                <Typography variant="h6" gutterBottom>📤 Resend History</Typography>
                 <TableContainer>
                   <Table size="small">
                     <TableHead>
@@ -1368,22 +1015,12 @@ const InvoiceView = () => {
                     <TableBody>
                       {invoice.resendHistory.map((history, index) => (
                         <TableRow key={index}>
-                          <TableCell>
-                            {format(
-                              new Date(history.resentAt),
-                              "dd/MM/yyyy HH:mm",
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {history.resentBy?.name || "Admin"}
-                          </TableCell>
+                          <TableCell>{format(new Date(history.resentAt), "dd/MM/yyyy HH:mm")}</TableCell>
+                          <TableCell>{history.resentBy?.name || "Admin"}</TableCell>
                           <TableCell>{history.reason || "Resent"}</TableCell>
                           <TableCell>
                             {history.previousSentAt
-                              ? format(
-                                  new Date(history.previousSentAt),
-                                  "dd/MM/yyyy HH:mm",
-                                )
+                              ? format(new Date(history.previousSentAt), "dd/MM/yyyy HH:mm")
                               : "-"}
                           </TableCell>
                         </TableRow>
@@ -1401,16 +1038,8 @@ const InvoiceView = () => {
           <Grid item xs={12}>
             <Card>
               <CardContent>
-                <Typography
-                  variant="subtitle2"
-                  color="text.secondary"
-                  gutterBottom
-                >
-                  📝 Notes
-                </Typography>
-                <Typography variant="body2" style={{ whiteSpace: "pre-line" }}>
-                  {invoice.notes}
-                </Typography>
+                <Typography variant="subtitle2" color="text.secondary" gutterBottom>📝 Notes</Typography>
+                <Typography variant="body2" style={{ whiteSpace: "pre-line" }}>{invoice.notes}</Typography>
               </CardContent>
             </Card>
           </Grid>
@@ -1420,58 +1049,31 @@ const InvoiceView = () => {
         <Grid item xs={12}>
           <Card>
             <CardContent>
-              <Typography variant="h6" gutterBottom>
-                📅 Timeline
-              </Typography>
+              <Typography variant="h6" gutterBottom>📅 Timeline</Typography>
               <Grid container spacing={2}>
                 <Grid item xs={12} sm={3}>
-                  <Typography variant="body2" color="text.secondary">
-                    Generated:
-                  </Typography>
-                  <Typography variant="body2">
-                    {format(new Date(invoice.generatedAt), "dd/MM/yyyy HH:mm")}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    by {invoice.generatedBy?.name || "System"}
-                  </Typography>
+                  <Typography variant="body2" color="text.secondary">Generated:</Typography>
+                  <Typography variant="body2">{format(new Date(invoice.generatedAt), "dd/MM/yyyy HH:mm")}</Typography>
+                  <Typography variant="caption" color="text.secondary">by {invoice.generatedBy?.name || "System"}</Typography>
                 </Grid>
-
                 {invoice.verifiedAt && (
                   <Grid item xs={12} sm={3}>
-                    <Typography variant="body2" color="text.secondary">
-                      Last Verified:
-                    </Typography>
-                    <Typography variant="body2">
-                      {format(new Date(invoice.verifiedAt), "dd/MM/yyyy HH:mm")}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      by {invoice.verifiedBy?.name}
-                    </Typography>
+                    <Typography variant="body2" color="text.secondary">Last Verified:</Typography>
+                    <Typography variant="body2">{format(new Date(invoice.verifiedAt), "dd/MM/yyyy HH:mm")}</Typography>
+                    <Typography variant="caption" color="text.secondary">by {invoice.verifiedBy?.name}</Typography>
                   </Grid>
                 )}
-
                 {invoice.sentAt && (
                   <Grid item xs={12} sm={3}>
-                    <Typography variant="body2" color="text.secondary">
-                      Sent:
-                    </Typography>
-                    <Typography variant="body2">
-                      {format(new Date(invoice.sentAt), "dd/MM/yyyy HH:mm")}
-                    </Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      by {invoice.sentBy?.name}
-                    </Typography>
+                    <Typography variant="body2" color="text.secondary">Sent:</Typography>
+                    <Typography variant="body2">{format(new Date(invoice.sentAt), "dd/MM/yyyy HH:mm")}</Typography>
+                    <Typography variant="caption" color="text.secondary">by {invoice.sentBy?.name}</Typography>
                   </Grid>
                 )}
-
                 {invoice.paidAt && (
                   <Grid item xs={12} sm={3}>
-                    <Typography variant="body2" color="text.secondary">
-                      Paid:
-                    </Typography>
-                    <Typography variant="body2">
-                      {format(new Date(invoice.paidAt), "dd/MM/yyyy HH:mm")}
-                    </Typography>
+                    <Typography variant="body2" color="text.secondary">Paid:</Typography>
+                    <Typography variant="body2">{format(new Date(invoice.paidAt), "dd/MM/yyyy HH:mm")}</Typography>
                   </Grid>
                 )}
               </Grid>
@@ -1480,82 +1082,40 @@ const InvoiceView = () => {
         </Grid>
       </Grid>
 
-      {/* Re-verify Confirmation Dialog - UPDATE KARO */}
-      <Dialog
-        open={reVerifyDialog}
-        onClose={() => setReVerifyDialog(false)}
-        maxWidth="sm"
-        fullWidth
-      >
+      {/* Dialogs */}
+      {/* Re-verify Dialog */}
+      <Dialog open={reVerifyDialog} onClose={() => setReVerifyDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              gap: 1,
-              color: "warning.main",
-            }}
-          >
-            <Warning />
-            <Typography variant="h6">Re-verify Sent Invoice?</Typography>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1, color: "warning.main" }}>
+            <Warning /><Typography variant="h6">Re-verify Sent Invoice?</Typography>
           </Box>
         </DialogTitle>
         <DialogContent>
-          <Alert severity="warning" sx={{ mb: 2 }}>
-            This invoice has already been sent to the school.
-          </Alert>
-
-          <Typography paragraph>
-            <strong>Warning:</strong> Modifying a sent invoice will:
-          </Typography>
-
+          <Alert severity="warning" sx={{ mb: 2 }}>This invoice has already been sent to the school.</Alert>
+          <Typography paragraph><strong>Warning:</strong> Modifying a sent invoice will:</Typography>
           <ul>
             <li>Change the invoice amount and details</li>
             <li>Require re-sending to the school</li>
             <li>Create a new verification record</li>
             <li>The school will see the updated version</li>
           </ul>
-
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-            Consider if this correction is critical. For minor issues, you might
-            want to adjust in next month's invoice instead.
+          <Typography variant="body2" color="text.secondary">
+            Consider if this correction is critical. For minor issues, adjust in next month's invoice instead.
           </Typography>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setReVerifyDialog(false)}>Cancel</Button>
-          <Button
-            onClick={() => {
-              setReVerifyDialog(false);
-              navigate(`/invoices/${id}/verify`, {
-                state: {
-                  isReVerify: true,
-                  fromSent: true,
-                },
-              });
-            }}
-            variant="contained"
-            color="warning"
-          >
-            Yes, Re-verify
-          </Button>
+          <Button onClick={handleReVerify} variant="contained" color="warning">Yes, Re-verify</Button>
         </DialogActions>
       </Dialog>
 
-      {/* Resend/Send Confirmation Dialog - UPDATE KARO */}
-      <Dialog
-        open={resendDialog}
-        onClose={() => setResendDialog(false)}
-        maxWidth="sm"
-        fullWidth
-      >
+      {/* Resend Dialog */}
+      <Dialog open={resendDialog} onClose={() => setResendDialog(false)} maxWidth="sm" fullWidth>
         <DialogTitle>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
             <Send color="primary" />
             <Typography variant="h6">
-              {invoice?.status === "Verified"
-                ? "Send Invoice"
-                : "Resend Invoice"}
-              ?
+              {invoice?.status === "Verified" ? "Send Invoice" : "Resend Invoice"}?
             </Typography>
           </Box>
         </DialogTitle>
@@ -1566,17 +1126,21 @@ const InvoiceView = () => {
               : `Resend this invoice to ${invoice?.schoolDetails?.name}?`}
           </Typography>
 
+          {/* Email validation */}
+          {!invoice?.schoolDetails?.email && !invoice?.school?.email && (
+            <Alert severity="error" sx={{ mb: 2 }}>
+              <Typography variant="body2"><strong>No email found!</strong> Please update school details first.</Typography>
+            </Alert>
+          )}
+
           {invoice?.status === "Sent" && (
             <>
               <Alert severity="info" sx={{ mb: 2 }}>
                 <Typography variant="body2">
-                  <strong>Previously sent:</strong>{" "}
-                  {format(new Date(invoice.sentAt), "dd/MM/yyyy HH:mm")}
+                  <strong>Previously sent:</strong> {format(new Date(invoice.sentAt), "dd/MM/yyyy HH:mm")}
                   {invoice.sentBy?.name && ` by ${invoice.sentBy.name}`}
                 </Typography>
               </Alert>
-
-              {/* 👈 YEH TEXT FIELD ADD KARO - Resend reason ke liye */}
               <TextField
                 fullWidth
                 multiline
@@ -1591,68 +1155,38 @@ const InvoiceView = () => {
           )}
 
           <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-            <strong>Email:</strong>{" "}
-            {invoice?.schoolDetails?.email || invoice?.school?.email}
+            <strong>Email:</strong> {invoice?.schoolDetails?.email || invoice?.school?.email || "No email on record"}
           </Typography>
         </DialogContent>
         <DialogActions>
-          <Button
-            onClick={() => {
-              setResendDialog(false);
-              setResendReason(""); // Reset reason on cancel
-            }}
-          >
-            Cancel
-          </Button>
+          <Button onClick={() => { setResendDialog(false); setResendReason(""); }}>Cancel</Button>
           <Button
             onClick={handleResend}
             variant="contained"
             color="primary"
-            disabled={sending}
+            disabled={sending || (!invoice?.schoolDetails?.email && !invoice?.school?.email)}
           >
-            {sending
-              ? "Sending..."
-              : invoice?.status === "Verified"
-                ? "Send"
-                : "Resend"}
+            {sending ? "Sending..." : (invoice?.status === "Verified" ? "Send" : "Resend")}
           </Button>
         </DialogActions>
       </Dialog>
 
-      {/* Cancel Confirmation Dialog - UPDATE KARO */}
+      {/* Cancel Dialog */}
       <Dialog open={cancelDialog} onClose={() => setCancelDialog(false)}>
         <DialogTitle>
-          <Box
-            sx={{
-              display: "flex",
-              alignItems: "center",
-              gap: 1,
-              color: "error.main",
-            }}
-          >
-            <Warning />
-            <Typography variant="h6">Cancel Invoice?</Typography>
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1, color: "error.main" }}>
+            <Warning /><Typography variant="h6">Cancel Invoice?</Typography>
           </Box>
         </DialogTitle>
         <DialogContent>
-          <Typography paragraph>
-            Are you sure you want to cancel this invoice?
-          </Typography>
+          <Typography paragraph>Are you sure you want to cancel this invoice?</Typography>
           <Typography variant="body2" color="text.secondary">
-            This action cannot be undone. Cancelled invoices will be marked as
-            cancelled and cannot be modified further.
+            This action cannot be undone. Cancelled invoices cannot be modified further.
           </Typography>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setCancelDialog(false)} disabled={loading}>
-            No, Keep it
-          </Button>
-          <Button
-            onClick={handleCancel}
-            variant="contained"
-            color="error"
-            disabled={loading}
-          >
+          <Button onClick={() => setCancelDialog(false)} disabled={loading}>No, Keep it</Button>
+          <Button onClick={handleCancel} variant="contained" color="error" disabled={loading}>
             {loading ? "Cancelling..." : "Yes, Cancel Invoice"}
           </Button>
         </DialogActions>

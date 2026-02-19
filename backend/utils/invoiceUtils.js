@@ -230,47 +230,165 @@ export const generateInvoicePDF = async (invoice) => {
       y += 18;
     });
 
-    const sx = 350;
-    doc.fillColor("#000");
+    // ================= SUMMARY SECTION =================
 
-    // Orange border box
-    doc.rect(sx, y + 25, 200, 95).stroke("#F4A300");
+    const sx = 340;
+    let sy = y + 25; // पहले 35 था
 
-    let sy = y + 35;
+    // ===== Calculate Payment Properly =====
+    const totalPaid =
+      invoice.paymentHistory?.reduce((sum, p) => sum + p.amount, 0) || 0;
 
+    const balanceDue = invoice.grandTotal - totalPaid;
+
+    // ===== Dynamic Box Height (Compact) =====
+    let boxHeight = 115;
+
+    if (invoice.previousDueBreakdown?.length > 0) {
+      boxHeight += invoice.previousDueBreakdown.length * 18 + 10;
+    }
+
+    if (invoice.paymentHistory?.length > 0) {
+      boxHeight += invoice.paymentHistory.length * 16 + 30;
+    }
+
+    // ===== Outer Box =====
+    doc
+      .roundedRect(sx, y + 20, 230, boxHeight, 6)
+      .lineWidth(1.2)
+      .stroke("#F4A300");
+
+    // ===== Helper Row Function (Compact spacing) =====
     const row = (label, val, bold = false) => {
       doc.font(bold ? "Helvetica-Bold" : "Helvetica");
+      doc.fontSize(9);
 
-      // FULL WIDTH LINE
-      doc.text(`${label}`, sx + 10, sy, {
-        width: 120,
-        align: "left",
-      });
+      doc.text(label, sx + 15, sy, { width: 130 });
 
-      doc.text(money(val), sx + 10, sy, {
-        width: 180,
+      doc.text(money(val), sx + 15, sy, {
+        width: 200,
         align: "right",
       });
 
-      sy += 18;
+      sy += 16; // पहले 22 था
     };
 
-    row("Subtotal:", invoice.subtotal);
+    // ===== Current Month Calculation =====
+    row(`Subtotal (${invoice.month}/${invoice.year})`, invoice.subtotal);
 
     if (invoice.tdsAmount > 0)
-      row(`TDS (${invoice.tdsPercent}%):`, -invoice.tdsAmount);
+      row(`TDS (${invoice.tdsPercent}%)`, -invoice.tdsAmount);
 
     if (invoice.gstAmount > 0)
-      row(`GST (${invoice.gstPercent}%):`, invoice.gstAmount);
+      row(`GST (${invoice.gstPercent}%)`, invoice.gstAmount);
 
-    row("Grand Total:", invoice.grandTotal, true);
+    const netCurrent = invoice.subtotal - invoice.tdsAmount + invoice.gstAmount;
 
-    if (invoice.paidAmount > 0) {
-      row("Paid:", invoice.paidAmount);
-      row("Balance Due:", invoice.grandTotal - invoice.paidAmount, true);
+    row("Net Current Total", netCurrent, true);
+
+    // Divider
+    doc
+      .moveTo(sx + 10, sy)
+      .lineTo(sx + 220, sy)
+      .stroke("#ddd");
+    sy += 10;
+
+    // ===== Previous Outstanding =====
+    if (invoice.previousDueBreakdown?.length > 0) {
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(9)
+        .text("Previous Outstanding", sx + 15, sy);
+
+      sy += 14;
+
+      doc.font("Helvetica").fontSize(9);
+
+      invoice.previousDueBreakdown.forEach((prev) => {
+        const label = `${prev.month}/${prev.year} (${prev.invoiceNumber})`;
+
+        doc.text(label, sx + 15, sy, { width: 130 });
+
+        doc.text(money(prev.dueAmount), sx + 15, sy, {
+          width: 200,
+          align: "right",
+        });
+
+        sy += 15; // पहले 20 था
+      });
+
+      sy += 6;
+
+      doc
+        .moveTo(sx + 10, sy)
+        .lineTo(sx + 220, sy)
+        .stroke("#ddd");
+
+      sy += 10;
     }
 
-    y = sy + 10;
+    // ===== Payment History =====
+    if (invoice.paymentHistory?.length > 0) {
+      doc
+        .font("Helvetica-Bold")
+        .fontSize(9)
+        .text("Payments Received", sx + 15, sy);
+
+      sy += 14;
+
+      doc.font("Helvetica").fontSize(9);
+
+      invoice.paymentHistory.forEach((pay) => {
+        const payDate = format(new Date(pay.paymentDate), "dd/MM/yyyy");
+
+        doc.text(payDate, sx + 15, sy, { width: 120 });
+
+        doc.text(money(pay.amount), sx + 15, sy, {
+          width: 200,
+          align: "right",
+        });
+
+        sy += 14; // पहले 20 था
+      });
+
+      sy += 6;
+
+      doc
+        .moveTo(sx + 10, sy)
+        .lineTo(sx + 220, sy)
+        .stroke("#ddd");
+
+      sy += 10;
+
+      doc.font("Helvetica-Bold");
+
+      doc.text("Total Paid", sx + 15, sy);
+
+      doc.text(money(totalPaid), sx + 15, sy, {
+        width: 200,
+        align: "right",
+      });
+
+      sy += 18; // पहले 25 था
+    }
+
+    // ===== FINAL AMOUNT PAYABLE (Payment Adjusted) =====
+    doc.roundedRect(sx + 5, sy - 4, 220, 26, 6).fill("#1F2A44");
+
+    doc.fillColor("#fff");
+    doc.font("Helvetica-Bold").fontSize(10);
+
+    doc.text("Grand Total Payable", sx + 15, sy + 4);
+
+    doc.text(money(balanceDue), sx + 15, sy + 4, {
+      width: 200,
+      align: "right",
+    });
+
+    doc.fillColor("#000");
+
+    sy += 30;
+    y = sy + 20; // पहले 30 था
 
     // Page break check before bank details
     if (y + 140 > BOTTOM) {
@@ -311,22 +429,31 @@ export const generateInvoicePDF = async (invoice) => {
     bankRow("Account Type: ", "Current");
     bankRow("UPI: ", "9660997790@hdfcbank");
 
-    let signY = doc.page.height - 250;
+    const FOOTER_SAFE_AREA = doc.page.height - 40;
 
-    try {
-      doc.image("assets/stamp.png", 60, signY + 20, { width: 90 });
-    } catch {}
+let signY = bankY + 20;
 
-    doc
-      .font("Helvetica-Bold")
-      .text(`For ${invoice.schoolDetails.name}`, 360, signY + 90);
+// अगर stamp नीचे जा रहा है तो उसे ऊपर adjust करो
+if (signY + 120 > FOOTER_SAFE_AREA) {
+  signY = FOOTER_SAFE_AREA - 120;
+}
+try {
+  doc.image("assets/stamp.png", bankX, signY, { width: 80 });
+} catch {}
 
-    doc
-      .moveTo(360, signY + 115)
-      .lineTo(520, signY + 115)
-      .stroke();
+   doc
+  .font("Helvetica-Bold")
+  .text(`For ${invoice.schoolDetails.name}`, 360, signY + 30);
 
-    doc.fontSize(8).text("School Authorized Signatory", 380, signY + 120);
+doc
+  .moveTo(360, signY + 55)
+  .lineTo(520, signY + 55)
+  .stroke();
+
+doc
+  .fontSize(8)
+  .text("School Authorized Signatory", 380, signY + 60);
+
 
     doc.end();
   });
