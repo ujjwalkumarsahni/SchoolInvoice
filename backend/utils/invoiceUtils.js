@@ -163,7 +163,7 @@ export const generateInvoicePDF = async (invoice) => {
 
     // ===== TABLE HEADER =====
 
-    y = Math.max(y, billToY) + 60;
+    y = Math.max(y, billToY) + 30;
 
     const tableX = 20;
     const tableWidth = 555;
@@ -395,62 +395,54 @@ export const generateInvoicePDF = async (invoice) => {
       addNewPage(doc);
       y = TOP + 20;
     }
-    // ================= COMPANY BANK DETAILS =================
+    // ================= FIXED FOOTER SECTION =================
 
-    const bankX = 20;
-    let bankY = y + 10;
+const FOOTER_SAFE_AREA = doc.page.height - 70; // footer se 60px upar
+const bankSectionHeight = 110; // approx height of bank block
 
-    // Heading
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(10)
-      .fillColor("#1F2A44")
-      .text("Company Bank Details", bankX, bankY);
+const bankX = 20;
+const stampWidth = 90;
 
-    bankY += 18;
+// Bottom anchored Y
+const bankY = FOOTER_SAFE_AREA - bankSectionHeight;
+const stampY = bankY;
 
-    // Details
-    doc.font("Helvetica").fontSize(9).fillColor("#000");
+// ===== Company Bank Details (Left Side) =====
+doc
+  .font("Helvetica-Bold")
+  .fontSize(10)
+  .fillColor("#1F2A44")
+  .text("Company Bank Details", bankX, bankY);
 
-    const bankRow = (label, value) => {
-      doc
-        .font("Helvetica")
-        .text(label, bankX, bankY, { continued: true })
-        .font("Helvetica-Bold")
-        .text(value);
+let detailsY = bankY + 18;
 
-      bankY += 14;
-    };
+doc.font("Helvetica").fontSize(9).fillColor("#000");
 
-    bankRow("Account Holder: ", "Aaklan IT Solutions Pvt. Ltd.");
-    bankRow("Account Number: ", "50200062871746");
-    bankRow("IFSC: ", "HDFC0005306");
-    bankRow("Branch: ", "Nirman Nagar");
-    bankRow("Account Type: ", "Current");
-    bankRow("UPI: ", "9660997790@hdfcbank");
+const bankRow = (label, value) => {
+  doc
+    .font("Helvetica")
+    .text(label, bankX, detailsY, { continued: true })
+    .font("Helvetica-Bold")
+    .text(value);
 
-    const FOOTER_SAFE_AREA = doc.page.height - 40;
+  detailsY += 14;
+};
 
-    let signY = bankY + 20;
+bankRow("Account Holder: ", "Aaklan IT Solutions Pvt. Ltd.");
+bankRow("Account Number: ", "50200062871746");
+bankRow("IFSC: ", "HDFC0005306");
+bankRow("Branch: ", "Nirman Nagar");
+bankRow("Account Type: ", "Current");
+bankRow("UPI: ", "9660997790@hdfcbank");
 
-    // अगर stamp नीचे जा रहा है तो उसे ऊपर adjust करो
-    if (signY + 120 > FOOTER_SAFE_AREA) {
-      signY = FOOTER_SAFE_AREA - 120;
-    }
-    try {
-      doc.image("assets/stamp.png", bankX, signY, { width: 80 });
-    } catch {}
+// ===== Stamp (Right Side, Footer Aligned) =====
+const stampX = doc.page.width - stampWidth - 40;
 
-    doc
-      .font("Helvetica-Bold")
-      .text(`For ${invoice.schoolDetails.name}`, 360, signY + 30);
-
-    doc
-      .moveTo(360, signY + 55)
-      .lineTo(520, signY + 55)
-      .stroke();
-
-    doc.fontSize(8).text("School Authorized Signatory", 380, signY + 60);
+try {
+  doc.image("assets/stamp.png", stampX, stampY, {
+    width: stampWidth,
+  });
+} catch {}
 
     doc.end();
   });
@@ -701,7 +693,7 @@ export const sendPaymentReceiptEmail = async (toEmail, invoice, payment) => {
           <p><strong>Invoice Number:</strong> ${invoice.invoiceNumber}</p>
           <p><strong>Paid Amount:</strong> ₹${Number(payment.amount).toLocaleString("en-IN")}</p>
           <p><strong>Payment Date:</strong> ${new Date(
-            payment.paymentDate
+            payment.paymentDate,
           ).toLocaleDateString("en-IN")}</p>
           <p><strong>Payment Method:</strong> ${payment.paymentMethod || "N/A"}</p>
           <p><strong>Remaining Balance:</strong> ₹${remainingBalance.toLocaleString("en-IN")}</p>
@@ -741,4 +733,3 @@ export const sendPaymentReceiptEmail = async (toEmail, invoice, payment) => {
     return false;
   }
 };
-
